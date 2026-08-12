@@ -9686,13 +9686,18 @@
     "file": "ha/leadership/high_availability_test.cpp",
     "test": "HighAvailabilityTest.EtcdStorePrefixWatchCancelDoesNotReportBroken"
    },
-   "reason": "EtcdOpLogChangeNotifier has a stop path, but no discoverable real-etcd Rust test observes normal cancellation and verifies that it emits no unhealthy or broken outcome.",
+   "reason": "cpp_parity_high_availability_test_etcd_store_prefix_watch_cancel_does_not_report_broken uses the production EtcdOpLogStore change notifier against a unique live-etcd prefix. It waits for the production health flag proving the prefix watch is active, writes and receives the exact fenced sequence-one record, rechecks watch health, explicitly stops and joins the notifier, confirms it is no longer healthy, waits 200 ms, and proves the error callback was never invoked. This is the Rust notifier boundary equivalent of normal prefix-watch cancellation without WATCH_BROKEN.",
    "review": {
     "oracle": "high_availability_test.cpp EtcdStorePrefixWatchCancelDoesNotReportBroken and EtcdHelper prefix-watch cancellation",
     "reviewed": true
    },
-   "rust": [],
-   "status": "missing"
+   "rust": [
+    {
+     "file": "mooncake-store-master/tests/test_etcd_oplog_live.rs",
+     "test": "cpp_parity_high_availability_test_etcd_store_prefix_watch_cancel_does_not_report_broken"
+    }
+   ],
+   "status": "covered"
   },
   {
    "behavior": "Explicit leadership release while a monitor is running does not invoke the leadership-loss callback within one second.",

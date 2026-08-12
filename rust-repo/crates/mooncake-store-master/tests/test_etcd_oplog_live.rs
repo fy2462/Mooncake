@@ -357,6 +357,50 @@ async fn cpp_parity_high_availability_test_leadership_monitor_reports_keepalive_
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn cpp_parity_high_availability_test_etcd_store_prefix_watch_cancel_does_not_report_broken() {
+    let Some(mut fixture) = LiveEtcdFixture::new("notifier-cancel").await else {
+        return;
+    };
+    let mut notifier = fixture
+        .store
+        .create_change_notifier()
+        .expect("etcd oplog store exposes its production prefix notifier");
+    let (entry_tx, entry_rx) = std::sync::mpsc::channel();
+    let (error_tx, error_rx) = std::sync::mpsc::channel();
+    notifier
+        .start(
+            1,
+            Box::new(move |entry| entry_tx.send(entry).unwrap()),
+            Box::new(move |error| error_tx.send(error).unwrap()),
+        )
+        .unwrap();
+    let healthy_deadline = Instant::now() + Duration::from_secs(5);
+    while !notifier.is_healthy() && Instant::now() < healthy_deadline {
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert!(notifier.is_healthy(), "prefix watch becomes active");
+
+    let sequence = fixture
+        .store
+        .append(&opaque_record(fixture.view, "watch-cancel-value"))
+        .unwrap();
+    fixture.store.flush_async().await.unwrap();
+    let observed = entry_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+    assert_eq!(sequence, 1);
+    assert_eq!(observed.seq, 1);
+    assert_eq!(observed.payload, "watch-cancel-value");
+    assert!(
+        notifier.is_healthy(),
+        "active watch remains healthy before stop"
+    );
+
+    notifier.stop();
+    assert!(!notifier.is_healthy());
+    std::thread::sleep(Duration::from_millis(200));
+    assert!(error_rx.try_recv().is_err());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn cpp_parity_ha_oplog_etcd_oplog_store_test_cpp_etcdoplogstoretest_testwriteoplog() {
     let Some(mut fixture) = LiveEtcdFixture::new("write").await else {
         return;
