@@ -136,6 +136,63 @@ async def test_allocate_and_mount_segments_rounds_and_frees(cachelib_master):
 
 
 @pytest.mark.asyncio
+async def test_segment_unmount_apis_reject_foreign_ownership(
+    cachelib_master, tmp_path, monkeypatch
+):
+    """Match RealClientTest.MountAndAllocateUnmountApisRejectForeignSegments."""
+    backing_file = tmp_path / "ownership-segment.bin"
+    backing_file.write_bytes(b"\0" * SLAB_SIZE)
+    monkeypatch.setenv("MC_MAX_MR_SIZE", str(SLAB_SIZE))
+
+    client = await _client(cachelib_master)
+    try:
+        owned_ids, allocated_size = await client.allocate_and_mount_segments(1)
+        assert owned_ids and allocated_size == SLAB_SIZE
+        # Allocator-owned UUIDs are not accepted by plain file unmount.
+        assert await client.unmount_segments(owned_ids) != 0
+
+        status, file_ids = await client.mount_file_segments(
+            str(backing_file), 0, SLAB_SIZE, "tcp", ""
+        )
+        assert status == 0 and len(file_ids) == 1
+        # File-mounted UUIDs are not accepted by allocator release.
+        with pytest.raises(Exception):
+            await client.unmount_and_free_segments(file_ids)
+
+        await client.unmount_and_free_segments(owned_ids)
+        assert await client.unmount_segments(file_ids) == 0
+        backing_file.unlink()
+        assert not backing_file.exists()
+    finally:
+        await client.close()
+
+
+@pytest.mark.asyncio
+async def test_segment_unmount_apis_accept_grace_period(
+    cachelib_master, tmp_path, monkeypatch
+):
+    """Match RealClientTest.MountAndAllocateUnmountApisAcceptGracePeriod."""
+    backing_file = tmp_path / "grace-segment.bin"
+    backing_file.write_bytes(b"\0" * SLAB_SIZE)
+    monkeypatch.setenv("MC_MAX_MR_SIZE", str(SLAB_SIZE))
+
+    client = await _client(cachelib_master)
+    try:
+        owned_ids, _ = await client.allocate_and_mount_segments(1)
+        assert await client.unmount_and_free_segments(owned_ids, 1) == 0
+
+        status, file_ids = await client.mount_file_segments(
+            str(backing_file), 0, SLAB_SIZE, "tcp", ""
+        )
+        assert status == 0 and len(file_ids) == 1
+        assert await client.unmount_segments(file_ids, 1) == 0
+        backing_file.unlink()
+        assert not backing_file.exists()
+    finally:
+        await client.close()
+
+
+@pytest.mark.asyncio
 async def test_allocate_and_mount_segments_rejects_overflow_without_outputs(
     cachelib_master,
 ):

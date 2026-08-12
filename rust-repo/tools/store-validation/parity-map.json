@@ -22593,13 +22593,18 @@
     "file": "pybind_client_test.cpp",
     "test": "RealClientTest.MountAndAllocateUnmountApisRejectForeignSegments"
    },
-   "reason": "Missing: first add PyO3 compatibility APIs for file-backed mount `(path, offset, size, protocol, location)->segment_ids` and UUID-list plain unmount, preserving a distinct file-mounted ownership set alongside allocated ids. Then add `test_segment_unmount_api_rejects_foreign_ownership` with one owned allocation and one slab-sized temporary file: assert each opposite API fails, each owning API succeeds, and file removal succeeds. Discoverable Rust evidence `dynamic_owned_segment_mount_routes_data_and_unmounts_by_canonical_id` in `test_client_inproc_e2e.rs` covers only core owned canonical ids, not this binding surface.",
+   "reason": "The PyO3 compatibility APIs are present: mount_file_segments returns file-owned UUIDs, unmount_segments accepts those UUIDs, and unmount_and_free_segments accepts allocator-owned UUIDs. The low-memory Python parity test mounts one 16-MiB file segment and one allocator segment, asserts each foreign ownership API fails, then uses each owning API and removes the backing file.",
    "review": {
     "oracle": "mooncake-store/tests/pybind_client_test.cpp and directly exercised mounted/allocated ownership maps in mooncake-store/src/real_client.cpp",
     "reviewed": true
    },
-   "rust": [],
-   "status": "missing"
+   "rust": [
+    {
+     "file": "python/tests/test_pybind_client_parity.py",
+     "test": "test_segment_unmount_apis_reject_foreign_ownership"
+    }
+   ],
+   "status": "covered"
   },
   {
    "behavior": "Owned allocation unmount-and-free with a one-second grace period succeeds; a slab-sized file mount plain-unmount with the same grace period succeeds; teardown and deletion of the temporary file succeed.",
@@ -22613,13 +22618,18 @@
     "file": "pybind_client_test.cpp",
     "test": "RealClientTest.MountAndAllocateUnmountApisAcceptGracePeriod"
    },
-   "reason": "Missing: first add PyO3 file-backed mount and UUID-list plain-unmount compatibility APIs, and add a `grace_period_seconds` argument to both plain unmount and unmount-and-free that preserves the C++ one-second unit. Then add `test_segment_unmount_apis_accept_nonzero_grace_period` with owned and slab-sized file fixtures, grace 1, successful calls, teardown, and file deletion. Discoverable Rust evidence `dynamic_owned_segment_mount_routes_data_and_unmounts_by_canonical_id` uses immediate core cleanup and has no PyO3 file/grace path.",
+   "reason": "The PyO3 APIs expose nonzero grace periods on both ownership-specific unmount paths. The low-memory Python parity test allocates one 16-MiB segment and mounts one 16-MiB file segment, invokes both owning APIs with a one-second grace period, and verifies successful teardown and backing-file deletion.",
    "review": {
     "oracle": "mooncake-store/tests/pybind_client_test.cpp and direct graceful-unmount paths in mooncake-store/src/real_client.cpp",
     "reviewed": true
    },
-   "rust": [],
-   "status": "missing"
+   "rust": [
+    {
+     "file": "python/tests/test_pybind_client_parity.py",
+     "test": "test_segment_unmount_apis_accept_grace_period"
+    }
+   ],
+   "status": "covered"
   },
   {
    "behavior": "After setup, putting `Hello, RealClient!` returns zero; get_buffer returns a non-null handle with exactly that byte count and bytes; isExist returns one for the key.",
