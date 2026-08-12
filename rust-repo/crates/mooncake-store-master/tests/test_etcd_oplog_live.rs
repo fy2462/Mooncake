@@ -1,4 +1,7 @@
-use etcd_client::{Compare, CompareOp, PutOptions, Txn, TxnOp, WatchOptions};
+use etcd_client::{
+    Compare, CompareOp, DeleteOptions, GetOptions, PutOptions, SortOrder, SortTarget, Txn, TxnOp,
+    WatchOptions,
+};
 use mooncake_store_master::ha::{LeaderCoordinator, LeaderRole, OpLogRecord};
 use mooncake_store_master::oplog::{EtcdOpLogStore, OpLogManager, OpLogStore};
 use std::sync::Arc;
@@ -166,6 +169,125 @@ async fn start_live_keepalive(
     });
     ready_rx.await.unwrap();
     task
+}
+
+fn exclusive_prefix_end(prefix: &[u8]) -> Vec<u8> {
+    let mut end = prefix.to_vec();
+    for index in (0..end.len()).rev() {
+        if end[index] != u8::MAX {
+            end[index] += 1;
+            end.truncate(index + 1);
+            return end;
+        }
+    }
+    vec![0]
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn cpp_parity_high_availability_test_oplog_persistence_interfaces() {
+    if !live_etcd_enabled() {
+        eprintln!("skipping live etcd oplog e2e; set MOONCAKE_ETCD_OPLOG_E2E=1 to enable");
+        return;
+    }
+
+    let namespace = format!("ha-etcd-persistence-{}", Uuid::new_v4().simple());
+    let prefix = format!("mooncake-store/test/{namespace}/").into_bytes();
+    let prefix_end = exclusive_prefix_end(&prefix);
+    let mut client = etcd_client::Client::connect([live_etcd_endpoint()], None)
+        .await
+        .unwrap();
+
+    let basic_key = [prefix.as_slice(), b"oplog_test_1"].concat();
+    client
+        .put(basic_key.clone(), b"v1".to_vec(), None)
+        .await
+        .unwrap();
+    let basic = client.get(basic_key, None).await.unwrap();
+    assert_eq!(basic.kvs().len(), 1);
+    assert_eq!(basic.kvs()[0].value(), b"v1");
+    assert!(basic.kvs()[0].mod_revision() > 0);
+
+    let cas_key = [prefix.as_slice(), b"oplog_cas_1"].concat();
+    let create = client
+        .txn(
+            Txn::new()
+                .when([Compare::version(cas_key.clone(), CompareOp::Equal, 0)])
+                .and_then([TxnOp::put(cas_key.clone(), b"initial".to_vec(), None)]),
+        )
+        .await
+        .unwrap();
+    assert!(create.succeeded());
+    let conflict = client
+        .txn(
+            Txn::new()
+                .when([Compare::version(cas_key.clone(), CompareOp::Equal, 0)])
+                .and_then([TxnOp::put(cas_key, b"conflict".to_vec(), None)]),
+        )
+        .await
+        .unwrap();
+    assert!(!conflict.succeeded());
+
+    let range_prefix = [prefix.as_slice(), b"range/"].concat();
+    let k1 = [range_prefix.as_slice(), b"a"].concat();
+    let k2 = [range_prefix.as_slice(), b"b"].concat();
+    let k3 = [range_prefix.as_slice(), b"c"].concat();
+    for (key, value) in [
+        (k1.clone(), b"val_a".to_vec()),
+        (k2.clone(), b"val_b".to_vec()),
+        (k3.clone(), b"val_c".to_vec()),
+    ] {
+        client.put(key, value, None).await.unwrap();
+    }
+
+    let first = client
+        .get(
+            range_prefix.clone(),
+            Some(
+                GetOptions::new()
+                    .with_prefix()
+                    .with_sort(SortTarget::Key, SortOrder::Ascend)
+                    .with_limit(1),
+            ),
+        )
+        .await
+        .unwrap();
+    assert_eq!(first.kvs().len(), 1);
+    assert_eq!(first.kvs()[0].key(), k1);
+    let last = client
+        .get(
+            range_prefix,
+            Some(
+                GetOptions::new()
+                    .with_prefix()
+                    .with_sort(SortTarget::Key, SortOrder::Descend)
+                    .with_limit(1),
+            ),
+        )
+        .await
+        .unwrap();
+    assert_eq!(last.kvs().len(), 1);
+    assert_eq!(last.kvs()[0].key(), k3);
+
+    let exclusive = client
+        .get(k1.clone(), Some(GetOptions::new().with_range(k3.clone())))
+        .await
+        .unwrap();
+    assert_eq!(exclusive.kvs().len(), 2);
+    assert_eq!(exclusive.kvs()[0].key(), k1);
+    assert_eq!(exclusive.kvs()[0].value(), b"val_a");
+    assert_eq!(exclusive.kvs()[1].key(), k2);
+    assert_eq!(exclusive.kvs()[1].value(), b"val_b");
+
+    client
+        .delete(
+            prefix.clone(),
+            Some(DeleteOptions::new().with_range(prefix_end)),
+        )
+        .await
+        .unwrap();
+    for key in [k1, k2, k3] {
+        assert!(client.get(key, None).await.unwrap().kvs().is_empty());
+    }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

@@ -9745,13 +9745,18 @@
     "file": "ha/leadership/high_availability_test.cpp",
     "test": "HighAvailabilityTest.OpLogPersistenceInterfaces"
    },
-   "reason": "Rust EtcdOpLogStore implements fenced ordered transactions and latest-pointer writes, but no discoverable real-etcd test covers these concrete KV/CAS/range/delete persistence-interface oracles.",
+   "reason": "cpp_parity_high_availability_test_oplog_persistence_interfaces uses etcd-client, the same production etcd dependency, in a unique live-etcd namespace. It proves exact put/get bytes and a positive revision, version-zero create success followed by an exact create conflict, lexicographically sorted first/last prefix keys, the exclusive [a,c) range with exact a/b values and no c, then deletes the full namespace range and proves a, b, and c are absent. The C++ fixture grants but never attaches or asserts its final lease; lease behavior is covered by EtcdBasicOperations rather than overclaimed here.",
    "review": {
     "oracle": "high_availability_test.cpp OpLogPersistenceInterfaces and EtcdHelper persistence calls",
     "reviewed": true
    },
-   "rust": [],
-   "status": "missing"
+   "rust": [
+    {
+     "file": "mooncake-store-master/tests/test_etcd_oplog_live.rs",
+     "test": "cpp_parity_high_availability_test_oplog_persistence_interfaces"
+    }
+   ],
+   "status": "covered"
   },
   {
    "behavior": "Writing sequence 1 succeeds and the durable /latest pointer subsequently reads as 1.",
