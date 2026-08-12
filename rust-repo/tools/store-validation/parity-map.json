@@ -10433,13 +10433,18 @@
     "file": "ha/oplog/ha_recovery_test.cpp",
     "test": "HaRecoveryTest.PromotionCatchUp_AllEntriesApplied"
    },
-   "reason": "Rust localfs_writer_and_standby_sync_mixed_state_then_promote covers LocalFS catch-up, but no discoverable elected-etcd/shared-oplog test controls pending 11-through-15 and asserts the final promotion replay watermark.",
+   "reason": "Rust starts the production follower against an Arc-shared InMemoryOpLog containing sequences 1 through 10 and waits for applied sequence 10. It then appends exact entries 11 through 15 and immediately promotes; the production final catch-up returns applied sequence 15, materializes the exact 15 keys, and stops the follower, corresponding to expected sequence 16.",
    "review": {
-    "oracle": "ha_recovery_test.cpp PromotionCatchUp_AllEntriesApplied and OpLogApplier::ApplyOpLogEntries; Rust hot_standby.rs run_promotion_catch_up/localfs_writer_and_standby_sync_mixed_state_then_promote",
+    "oracle": "ha_recovery_test.cpp PromotionCatchUp_AllEntriesApplied and OpLogApplier::ApplyOpLogEntries; Rust hot_standby.rs cpp_parity_ha_oplog_ha_recovery_test_cpp_harecoverytest_promotioncatchup_allentriesapplied",
     "reviewed": true
    },
-   "rust": [],
-   "status": "missing"
+   "rust": [
+    {
+     "file": "mooncake-store-master/src/hot_standby.rs",
+     "test": "cpp_parity_ha_oplog_ha_recovery_test_cpp_harecoverytest_promotioncatchup_allentriesapplied"
+    }
+   ],
+   "status": "covered"
   },
   {
    "behavior": "When 9 and 10 are pending behind missing 8, a late durable 8 is fetched from the shared oplog and entries 8 through 10 drain before promotion, reaching expected sequence 11 and ten objects.",

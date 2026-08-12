@@ -288,6 +288,93 @@ mod tests {
         reads: Arc<Mutex<Vec<u64>>>,
     }
 
+    struct SharedMutableOpLog {
+        inner: Arc<Mutex<InMemoryOpLog>>,
+        follower_ceiling: Option<u64>,
+        promotion_reads: Option<Arc<Mutex<Vec<u64>>>>,
+    }
+
+    impl SharedMutableOpLog {
+        fn is_promotion_thread() -> bool {
+            std::thread::current().name() == Some("mooncake-promotion-catch-up")
+        }
+    }
+
+    impl OpLogStore for SharedMutableOpLog {
+        fn append(&mut self, entry: &OpLogRecord) -> Result<u64, HaError> {
+            self.inner.lock().append(entry)
+        }
+
+        fn read_since(
+            &self,
+            since_seq: u64,
+            max_count: usize,
+        ) -> Result<Vec<OpLogRecord>, HaError> {
+            let promotion = Self::is_promotion_thread();
+            if promotion && let Some(reads) = &self.promotion_reads {
+                reads.lock().push(since_seq);
+            }
+            let mut entries = self.inner.lock().read_since(since_seq, max_count)?;
+            if !promotion && let Some(ceiling) = self.follower_ceiling {
+                entries.retain(|entry| entry.seq <= ceiling);
+            }
+            Ok(entries)
+        }
+
+        fn latest_sequence(&self) -> u64 {
+            self.inner.lock().latest_sequence()
+        }
+
+        fn max_sequence_id(&self) -> Result<u64, HaError> {
+            let promotion = Self::is_promotion_thread();
+            let maximum = self.inner.lock().max_sequence_id()?;
+            if !promotion && let Some(ceiling) = self.follower_ceiling {
+                return Ok(maximum.min(ceiling));
+            }
+            Ok(maximum)
+        }
+
+        fn update_latest_sequence_id(&mut self, sequence_id: u64) -> Result<(), HaError> {
+            self.inner.lock().update_latest_sequence_id(sequence_id)
+        }
+
+        fn record_snapshot_sequence_id(
+            &mut self,
+            snapshot_id: &str,
+            sequence_id: u64,
+        ) -> Result<(), HaError> {
+            self.inner
+                .lock()
+                .record_snapshot_sequence_id(snapshot_id, sequence_id)
+        }
+
+        fn get_snapshot_sequence_id(&self, snapshot_id: &str) -> Result<u64, HaError> {
+            self.inner.lock().get_snapshot_sequence_id(snapshot_id)
+        }
+
+        fn cleanup_before(&mut self, before_sequence_id: u64) -> Result<(), HaError> {
+            self.inner.lock().cleanup_before(before_sequence_id)
+        }
+
+        fn flush_durable(&mut self) -> Result<(), HaError> {
+            self.inner.lock().flush_durable()
+        }
+
+        fn poll_from(&self, since_seq: u64, max_count: usize) -> OpLogPollResult {
+            let promotion = Self::is_promotion_thread();
+            let mut result = self.inner.lock().poll_from(since_seq, max_count);
+            if !promotion && let Some(ceiling) = self.follower_ceiling {
+                result.records.retain(|entry| entry.seq <= ceiling);
+                result.next_seq = result
+                    .records
+                    .last()
+                    .map(|entry| entry.seq.saturating_add(1))
+                    .unwrap_or(since_seq);
+            }
+            result
+        }
+    }
+
     impl OpLogStore for StrictBaselineOpLog {
         fn append(&mut self, entry: &OpLogRecord) -> Result<u64, HaError> {
             self.inner.append(entry)
@@ -2240,6 +2327,111 @@ mod tests {
         }
         assert_eq!(service.latest_applied_sequence_id(), 20);
         service.stop();
+    }
+
+    #[tokio::test]
+    async fn cpp_parity_ha_oplog_ha_recovery_test_cpp_harecoverytest_promotioncatchup_allentriesapplied()
+     {
+        let state = Arc::new(MasterState::empty());
+        let segment_id = Uuid::new_v4();
+        let client_id = Uuid::new_v4();
+        let segment = Segment {
+            id: segment_id,
+            name: "promotion-catch-up:1".into(),
+            base: 0,
+            size: 15 * 1024,
+            te_endpoint: String::new(),
+            protocol: "tcp".into(),
+            host_id: String::new(),
+        };
+        state.segments.insert(
+            segment_id,
+            SegmentEntry {
+                segment: segment.clone(),
+                used: 0,
+                client_id,
+                status: crate::proto::SegmentStatus::Active,
+            },
+        );
+        state
+            .allocator
+            .write()
+            .add_segment(segment.clone(), 0, client_id);
+        let shared = Arc::new(Mutex::new(InMemoryOpLog::new(32)));
+        let append = |store: &mut InMemoryOpLog, index: u64| {
+            let replica =
+                snapshot_object(&format!("key_{index}"), &segment, (index - 1) * 1024, 1024)
+                    .replicas
+                    .into_iter()
+                    .next()
+                    .unwrap();
+            store.append_payload(
+                1,
+                serde_json::json!({
+                    "op": "put_end",
+                    "key": format!("key_{index}"),
+                    "size": 1024,
+                    "client_id": Uuid::nil().to_string(),
+                    "tenant_id": "default",
+                    "group_id": "",
+                    "user_key": format!("key_{index}"),
+                    "replicas": [replica],
+                })
+                .to_string(),
+            )
+        };
+        {
+            let mut store = shared.lock();
+            for index in 1_u64..=10 {
+                assert_eq!(append(&mut store, index), index);
+            }
+        }
+        let mut service = HotStandbyService::new(
+            state.clone(),
+            HotStandbyConfig {
+                enable_oplog_following: true,
+                oplog_poll_interval_ms: 10,
+                cluster_id: "test_cluster".into(),
+                ..Default::default()
+            },
+        );
+        let promotion_reads = Arc::new(Mutex::new(Vec::new()));
+        service.set_oplog_store(Box::new(SharedMutableOpLog {
+            inner: shared.clone(),
+            follower_ceiling: Some(10),
+            promotion_reads: Some(promotion_reads.clone()),
+        }));
+        service.start().await.unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(1), async {
+            while service.latest_applied_sequence_id() < 10 {
+                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("standby did not apply initial sequences 1 through 10");
+        assert_eq!(state.objects.len(), 10);
+        {
+            let mut store = shared.lock();
+            for index in 11_u64..=15 {
+                assert_eq!(append(&mut store, index), index);
+            }
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        assert_eq!(service.latest_applied_sequence_id(), 10);
+
+        let promoted_sequence = service.promote().await.unwrap();
+
+        assert_eq!(promoted_sequence, 15);
+        assert_eq!(state.objects.len(), 15);
+        for index in 1..=15 {
+            assert!(
+                state
+                    .objects
+                    .contains_key(&TenantId::default().make_scoped_key(&format!("key_{index}")))
+            );
+        }
+        assert_eq!(service.sync_status().state, StandbyState::Stopped);
+        assert_eq!(*promotion_reads.lock(), vec![11]);
     }
 
     #[tokio::test]
