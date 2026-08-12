@@ -29429,13 +29429,18 @@
     "file": "ha/standby/hot_standby_service_test.cpp",
     "test": "HotStandbyServiceTest.TestPromote_WhenReady"
    },
-   "reason": "Production prerequisite: in HotStandbyService::promote in hot_standby.rs, when oplog_applier is absent, return the recovered sync_status/baseline applied sequence instead of the current hard-coded zero while preserving snapshot-only state. Add cpp_parity_snapshot_only_baseline_42_promotes_and_stops_follower to src/hot_standby.rs; inject a local static snapshot at sequence 42, assert start is Ok and state Watching, promote returns exactly 42, final state is Stopped, and the restored snapshot object remains unchanged. This is the C++ snapshot-only service boundary and requires no etcd election, supervisor, or Serving lifecycle.",
+   "reason": "Rust loads a static snapshot at sequence 42 through the production snapshot-only HotStandbyService, verifies Watching and the recovered baseline, then promotes and returns exactly 42 before consuming the follower into Stopped. Exact object size, owner, Memory replica identity, offset, size, and Complete status remain unchanged. The production fix uses sync_status.applied_seq_id only when no oplog applier exists, leaving oplog-following promotion unchanged.",
    "review": {
-    "oracle": "mooncake-store/tests/ha/standby/hot_standby_service_test.cpp:243-250 and HotStandbyService::Promote",
+    "oracle": "mooncake-store/tests/ha/standby/hot_standby_service_test.cpp:243-250 and HotStandbyService::Promote; Rust hot_standby.rs cpp_parity_ha_standby_hot_standby_service_test_cpp_hotstandbyservicetest_testpromote_whenready",
     "reviewed": true
    },
-   "rust": [],
-   "status": "missing"
+   "rust": [
+    {
+     "file": "mooncake-store-master/src/hot_standby.rs",
+     "test": "cpp_parity_ha_standby_hot_standby_service_test_cpp_hotstandbyservicetest_testpromote_whenready"
+    }
+   ],
+   "status": "covered"
   },
   {
    "behavior": "Declared/skipped intent (no executed assertion): promotion performs a final oplog catch-up before completing.",

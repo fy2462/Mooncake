@@ -2015,6 +2015,70 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn cpp_parity_ha_standby_hot_standby_service_test_cpp_hotstandbyservicetest_testpromote_whenready()
+     {
+        let state = Arc::new(MasterState::empty());
+        let client_id = Uuid::new_v4();
+        let segment = Segment {
+            id: Uuid::new_v4(),
+            name: "snapshot-promote:1".into(),
+            base: 0,
+            size: 4096,
+            te_endpoint: String::new(),
+            protocol: "tcp".into(),
+            host_id: String::new(),
+        };
+        let scoped_key = TenantId::default().make_scoped_key("snapshot-key");
+        let expected_object = snapshot_object("snapshot-key", &segment, 0, 4096);
+        let snapshot = crate::ha::LoadedSnapshot {
+            snapshot_id: "snapshot-42".into(),
+            snapshot_sequence_id: 42,
+            allocator_config: None,
+            segments: vec![SegmentEntry {
+                segment,
+                used: 4096,
+                client_id,
+                status: crate::proto::SegmentStatus::Active,
+            }],
+            nof_segments: vec![],
+            objects: vec![(scoped_key.clone(), expected_object.clone())],
+            tasks: vec![],
+            replication_tasks: vec![],
+            graceful_unmounts: vec![],
+            delayed_replica_releases: vec![],
+            local_disk_segments: vec![],
+        };
+        let mut service = HotStandbyService::new(
+            state.clone(),
+            HotStandbyConfig {
+                enable_snapshot_bootstrap: true,
+                cluster_id: "snapshot-promote-cluster".into(),
+                ..Default::default()
+            },
+        );
+        service.set_snapshot_provider(Box::new(StaticSnapshotProvider { snapshot }));
+
+        service.start().await.unwrap();
+        assert_eq!(service.sync_status().state, StandbyState::Watching);
+        assert_eq!(service.latest_applied_sequence_id(), 42);
+
+        assert_eq!(service.promote().await.unwrap(), 42);
+        assert_eq!(service.sync_status().state, StandbyState::Stopped);
+        assert_eq!(service.latest_applied_sequence_id(), 42);
+        let restored = state.objects.get(&scoped_key).unwrap();
+        assert_eq!(restored.size, expected_object.size);
+        assert_eq!(restored.client_id, expected_object.client_id);
+        assert_eq!(restored.replicas.len(), 1);
+        assert_eq!(
+            restored.replicas[0].segment_id,
+            expected_object.replicas[0].segment_id
+        );
+        assert_eq!(restored.replicas[0].offset, 0);
+        assert_eq!(restored.replicas[0].size, 4096);
+        assert_eq!(restored.replicas[0].status, ReplicaStatus::Complete);
+    }
+
+    #[tokio::test]
     async fn cpp_parity_ha_oplog_ha_recovery_test_cpp_harecoverytest_snapshotthenoplogreplay() {
         let state = Arc::new(MasterState::empty());
         let client_id = Uuid::new_v4();
@@ -3357,7 +3421,7 @@ impl HotStandbyService {
             .oplog_applier
             .as_ref()
             .map(|a| a.get_expected_sequence_id().saturating_sub(1))
-            .unwrap_or(0);
+            .unwrap_or_else(|| self.sync_status.read().applied_seq_id);
 
         // Match the C++ lifecycle: promotion consumes and stops the follower.
         // Keeping the service in Promoted would reject Start on the next term.
