@@ -2125,6 +2125,71 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn cpp_parity_ha_standby_hot_standby_service_test_cpp_hotstandbyservicetest_teststart_snapshotonlywithsnapshot()
+     {
+        let state = Arc::new(MasterState::empty());
+        let client_id = Uuid::from_u128((1_u128 << 64) | 2);
+        let segment = Segment {
+            id: Uuid::new_v4(),
+            name: "snapshot-start:1".into(),
+            base: 0,
+            size: 4096,
+            te_endpoint: String::new(),
+            protocol: "tcp".into(),
+            host_id: String::new(),
+        };
+        let scoped_key = TenantId::default().make_scoped_key("key-1");
+        let mut object = snapshot_object("key-1", &segment, 0, 4096);
+        object.client_id = client_id;
+        let snapshot = crate::ha::LoadedSnapshot {
+            snapshot_id: "20260330_120000_000".into(),
+            snapshot_sequence_id: 42,
+            allocator_config: None,
+            segments: vec![SegmentEntry {
+                segment,
+                used: 4096,
+                client_id,
+                status: crate::proto::SegmentStatus::Active,
+            }],
+            nof_segments: vec![],
+            objects: vec![(scoped_key.clone(), object)],
+            tasks: vec![],
+            replication_tasks: vec![],
+            graceful_unmounts: vec![],
+            delayed_replica_releases: vec![],
+            local_disk_segments: vec![],
+        };
+        let mut service = HotStandbyService::new(
+            state,
+            HotStandbyConfig {
+                enable_snapshot_bootstrap: true,
+                cluster_id: "snapshot-start-cluster".into(),
+                ..Default::default()
+            },
+        );
+        service.set_snapshot_provider(Box::new(StaticSnapshotProvider { snapshot }));
+
+        service.start().await.unwrap();
+
+        let status = service.sync_status();
+        assert_eq!(status.state, StandbyState::Watching);
+        assert_eq!(status.applied_seq_id, 42);
+        assert_eq!(status.primary_seq_id, 42);
+        assert_eq!(status.lag_entries, 0);
+        assert!(status.is_connected);
+        assert!(!status.is_syncing);
+        assert_eq!(service.metadata_count(), 1);
+        assert_eq!(service.latest_applied_sequence_id(), 42);
+        let exported = service.export_metadata_snapshot();
+        assert_eq!(exported.len(), 1);
+        assert_eq!(exported[0].0, scoped_key);
+        assert_eq!(exported[0].1.user_key, "key-1");
+        assert_eq!(exported[0].1.size, 4096);
+        assert_eq!(exported[0].1.client_id, client_id);
+        service.stop();
+    }
+
+    #[tokio::test]
     async fn cpp_parity_ha_oplog_ha_recovery_test_cpp_harecoverytest_snapshotthenoplogreplay() {
         let state = Arc::new(MasterState::empty());
         let client_id = Uuid::new_v4();
@@ -3420,6 +3485,9 @@ impl HotStandbyService {
             status.state = StandbyState::Watching;
             status.applied_seq_id = baseline_seq_id;
             status.primary_seq_id = baseline_seq_id;
+            status.lag_entries = 0;
+            status.is_connected = true;
+            status.is_syncing = false;
             drop(status);
         }
 

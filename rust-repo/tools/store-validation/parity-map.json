@@ -29638,13 +29638,18 @@
     "file": "ha/standby/hot_standby_service_test.cpp",
     "test": "HotStandbyServiceTest.TestStart_SnapshotOnlyWithSnapshot"
    },
-   "reason": "Production prerequisite: add a read-only metadata count/export and latest-applied accessor to HotStandbyService in hot_standby.rs, and make snapshot-only status report the C++ connected baseline semantics. Add cpp_parity_snapshot_only_start_exports_key_1_at_sequence_42 to src/hot_standby.rs; use StaticSnapshotProvider with exactly key-1/size 4096/sequence 42, assert start Ok, Watching, count 1, latest/applied/primary 42, connected true, and exported key/size exactly, then stop. Existing snapshot tests inspect MasterState or one sequence but never this complete service result.",
+   "reason": "Rust starts the production snapshot-only HotStandbyService from a static sequence-42 snapshot containing exact client UUID 1-2 and key-1/4096. It asserts Watching, connected and not syncing, metadata count one, latest/applied/primary 42, and exports exactly one tenant-scoped entry whose user_key is key-1 with size 4096 and the exact client. A real Memory segment/replica is included solely to satisfy Rust restore invariants absent from the C++ metadata-only fixture.",
    "review": {
-    "oracle": "mooncake-store/tests/ha/standby/hot_standby_service_test.cpp:322-348 and HotStandbyService snapshot-only activation/export",
+    "oracle": "mooncake-store/tests/ha/standby/hot_standby_service_test.cpp:322-348 and HotStandbyService snapshot-only activation/export; Rust hot_standby.rs cpp_parity_ha_standby_hot_standby_service_test_cpp_hotstandbyservicetest_teststart_snapshotonlywithsnapshot",
     "reviewed": true
    },
-   "rust": [],
-   "status": "missing"
+   "rust": [
+    {
+     "file": "mooncake-store-master/src/hot_standby.rs",
+     "test": "cpp_parity_ha_standby_hot_standby_service_test_cpp_hotstandbyservicetest_teststart_snapshotonlywithsnapshot"
+    }
+   ],
+   "status": "covered"
   },
   {
    "behavior": "A snapshot-only standby started at sequence 42 with key-old can be stopped and restarted against a newer catalog snapshot; the restart replaces it with only key-new of size 8192 and last sequence 84, reports sequence 84, and returns to WATCHING.",
