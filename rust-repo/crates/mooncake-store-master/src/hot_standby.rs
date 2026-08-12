@@ -1969,6 +1969,27 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn cpp_parity_ha_standby_hot_standby_service_test_cpp_hotstandbyservicetest_testgetsyncstatus_aftersync()
+     {
+        let mut service = HotStandbyService::new(
+            Arc::new(MasterState::empty()),
+            HotStandbyConfig {
+                enable_oplog_following: true,
+                ..Default::default()
+            },
+        );
+
+        assert!(service.start().await.is_err());
+        let status = service.sync_status();
+        assert_eq!(status.state, StandbyState::Failed);
+        assert_eq!(status.applied_seq_id, 0);
+        assert_eq!(status.primary_seq_id, 0);
+        assert_eq!(status.lag_entries, 0);
+        assert!(!status.is_connected);
+        assert!(!status.is_syncing);
+    }
+
+    #[tokio::test]
     async fn test_snapshot_only_bootstrap_uses_empty_baseline_when_snapshot_missing() {
         let state = Arc::new(MasterState::empty());
         let mut service = HotStandbyService::new(

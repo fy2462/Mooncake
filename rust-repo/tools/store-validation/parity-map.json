@@ -29361,13 +29361,18 @@
     "file": "ha/standby/hot_standby_service_test.cpp",
     "test": "HotStandbyServiceTest.TestGetSyncStatus_AfterSync"
    },
-   "reason": "Production prerequisite: propagate controller dependency/connect failures into the exported raw standby status instead of leaving a non-running service looking Stopped. Add cpp_parity_failed_etcd_start_is_visible_in_sync_status to tests/test_ha_hot_standby_service.rs; use the normalized invalid-endpoint path and assert status state Failed after start returns exact HaError::InvalidBackend(\"invalid etcd endpoint: invalid_endpoint\"). Applied/primary/lag zero, disconnected/not-syncing flags, runtime non-serving, and idempotent cleanup are replacement-boundary strengthening beyond the C++ state-only assertion. Existing failure tests either inspect a direct in-memory worker or omit the production status.",
+   "reason": "The C++ etcd branch is unconditionally GTEST_SKIP; in its executable non-etcd branch Start fails before synchronization and the only required status assertion is Failed. Rust enables oplog following without a store, observes production Start failure, then reads the public sync status as Failed with zero sequences/lag and disconnected/not-syncing flags. This row does not claim the skipped etcd activity intent.",
    "review": {
-    "oracle": "mooncake-store/tests/ha/standby/hot_standby_service_test.cpp:213-224 and HotStandbyService::GetSyncStatus",
+    "oracle": "mooncake-store/tests/ha/standby/hot_standby_service_test.cpp:213-224 executable non-etcd branch; Rust hot_standby.rs cpp_parity_ha_standby_hot_standby_service_test_cpp_hotstandbyservicetest_testgetsyncstatus_aftersync",
     "reviewed": true
    },
-   "rust": [],
-   "status": "missing"
+   "rust": [
+    {
+     "file": "mooncake-store-master/src/hot_standby.rs",
+     "test": "cpp_parity_ha_standby_hot_standby_service_test_cpp_hotstandbyservicetest_testgetsyncstatus_aftersync"
+    }
+   ],
+   "status": "covered"
   },
   {
    "behavior": "Two consecutive GetSyncStatus calls on an unchanged fresh service return the same state and do not crash; no other field equality is asserted.",
