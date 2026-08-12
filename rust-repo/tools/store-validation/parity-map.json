@@ -29865,9 +29865,9 @@
     "file": "ha/standby/hot_standby_service_test.cpp",
     "test": "HotStandbyServiceTest.TestVerificationLoop_WhenEnabled"
    },
-   "reason": "Production prerequisite: add enable_verification/interval, a cancellable worker, mooncake_store_standby_verification_worker_active, mooncake_store_standby_verification_attempts_total, and mooncake_store_standby_verification_errors_total in hot_standby.rs without changing etcd-only HA. Add cpp_parity_etcd_verification_enabled_starts_and_joins_worker to tests/test_ha_hot_standby_service.rs; in a unique live-etcd namespace acquire/release an old LeaderCoordinator LeadershipSession/writer, acquire the current primary's real LeadershipSession/view and current-view election-fenced writer, assert read_current_view matches it and stale/old-view writer rejection, and start a separate standby with no candidate session/lease. With a short interval assert Watching, active gauge exactly 1, attempts delta at least one, and errors delta exactly zero; Stop must yield Stopped, active gauge exactly 0, and joined replication/verification workers. Release the primary LeadershipSession and lease/keepalive, assert no current view, and delete all namespace keys. Do not claim checksum semantics; telemetry strengthens skipped intent.",
+   "reason": "The C++ etcd branch is unconditionally GTEST_SKIP, but its executable non-etcd branch still sets enable_verification=true before the Start/Stop safety check. Rust has no verification configuration or worker boundary, so a default-config lifecycle test cannot represent this input even though no verification result is asserted.",
    "review": {
-    "oracle": "mooncake-store/tests/ha/standby/hot_standby_service_test.cpp:440-451 and HotStandbyService::VerificationLoop",
+    "oracle": "mooncake-store/tests/ha/standby/hot_standby_service_test.cpp:440-451 and Rust HotStandbyConfig (no verification field)",
     "reviewed": true
    },
    "rust": [],
@@ -29891,13 +29891,18 @@
     "file": "ha/standby/hot_standby_service_test.cpp",
     "test": "HotStandbyServiceTest.TestVerificationLoop_WhenDisabled"
    },
-   "reason": "Production prerequisite: expose mooncake_store_standby_verification_worker_active/attempts_total/errors_total with the verification configuration in hot_standby.rs. Add cpp_parity_etcd_verification_disabled_spawns_no_verifier to tests/test_ha_hot_standby_service.rs; in a unique live-etcd namespace acquire/release an old LeaderCoordinator LeadershipSession/writer, acquire the current primary's real LeadershipSession/view and current-view election-fenced writer, assert read_current_view matches it and stale/old-view writer rejection, then start a separate standby with verification false and no candidate session/lease. Wait longer than the configured interval and assert Watching, active gauge exactly 0, and attempt/error counter deltas exactly 0; Stop must be safe, Stopped, and join the replication worker. Release the primary LeadershipSession and lease/keepalive, assert no current view, and delete all namespace keys. Zero-worker telemetry strengthens the skipped intent; no-crash Start/Stop is the executed C++ minimum.",
+   "reason": "The C++ etcd branch is unconditionally GTEST_SKIP and executes no disabled-verifier assertion; its non-etcd branch ignores Start's result, calls Stop, and succeeds. Rust exercises the production local Start/Stop lifecycle and strengthens that executable safety oracle with exact Watching then Stopped/not-running assertions. Rust has no verification-worker configuration, and this row does not claim the skipped disabled-verifier intent.",
    "review": {
-    "oracle": "mooncake-store/tests/ha/standby/hot_standby_service_test.cpp:453-465 and HotStandbyService verification configuration",
+    "oracle": "mooncake-store/tests/ha/standby/hot_standby_service_test.cpp:453-465 executable non-etcd branch; Rust hot_standby.rs cpp_parity_ha_standby_hot_standby_service_test_cpp_hotstandbyservicetest_testverificationloop_whendisabled",
     "reviewed": true
    },
-   "rust": [],
-   "status": "missing"
+   "rust": [
+    {
+     "file": "mooncake-store-master/src/hot_standby.rs",
+     "test": "cpp_parity_ha_standby_hot_standby_service_test_cpp_hotstandbyservicetest_testverificationloop_whendisabled"
+    }
+   ],
+   "status": "covered"
   },
   {
    "behavior": "Upserting an explicit policy through an empty TenantId canonicalizes it to the default tenant; after recomputation its snapshot is present with the default ID, explicit=true, requested=1024, and effective=1024.",

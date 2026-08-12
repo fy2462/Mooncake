@@ -1880,6 +1880,19 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn cpp_parity_ha_standby_hot_standby_service_test_cpp_hotstandbyservicetest_testverificationloop_whendisabled()
+     {
+        let mut service =
+            HotStandbyService::new(Arc::new(MasterState::empty()), HotStandbyConfig::default());
+
+        service.start().await.unwrap();
+        assert_eq!(service.sync_status().state, StandbyState::Watching);
+        service.stop();
+        assert_eq!(service.sync_status().state, StandbyState::Stopped);
+        assert!(!service.is_running());
+    }
+
+    #[tokio::test]
     async fn test_snapshot_only_bootstrap_uses_empty_baseline_when_snapshot_missing() {
         let state = Arc::new(MasterState::empty());
         let mut service = HotStandbyService::new(
