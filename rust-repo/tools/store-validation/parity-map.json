@@ -14084,13 +14084,18 @@
     "file": "ha/snapshot/catalog/backends/redis/redis_snapshot_catalog_store_test.cpp",
     "test": "RedisSnapshotCatalogStoreTest.PublishListAndGetLatestRoundTrip"
    },
-   "reason": "No discoverable Rust test exercises Redis-catalog publish, latest, descriptor round trip, or List(0). Source review also found a latent ordering-contract difference: C++ scores the index from snapshot id while Rust uses created_at_ms, although this fixture gives both descriptors the same created_at_ms and does not independently distinguish the rules.",
+   "reason": "cpp_parity_redis_snapshot_catalog_publish_list_and_get_latest_round_trip uses a unique opt-in live Redis namespace and production RedisSnapshotCatalogStore with LocalFile object storage. It publishes the exact two C++ snapshot ids with matching sequence 42, view 7, and created_at 1700000000000; exact descriptor equality proves latest is the second snapshot and unlimited list is [second, first], including generated manifest/object-prefix fields. A drop guard deletes only the namespace latest/index keys even on panic. This covers the fixture's observable ordering without claiming that equal-score ordering defines the general score contract.",
    "review": {
     "oracle": "redis_snapshot_catalog_store_test.cpp PublishListAndGetLatestRoundTrip and redis_snapshot_catalog_store.cpp Publish/List; Rust snapshot.rs RedisSnapshotCatalogStore::publish/get_latest/list",
     "reviewed": true
    },
-   "rust": [],
-   "status": "missing"
+   "rust": [
+    {
+     "file": "mooncake-store-master/tests/test_redis_ha_live.rs",
+     "test": "cpp_parity_redis_snapshot_catalog_publish_list_and_get_latest_round_trip"
+    }
+   ],
+   "status": "covered"
   },
   {
    "behavior": "Loading the latest snapshot from a catalog with no latest marker succeeds and returns an empty optional snapshot.",
