@@ -18419,13 +18419,18 @@
     "file": "storage_backend_test.cpp",
     "test": "StorageBackendTest.BucketBatchOffloadContinuesAfterFinalizeFailure"
    },
-   "reason": "Partial evidence only: Rust commits accepted bucket victims through a durable accepted-eviction journal, and restart_finishes_durable_accepted_eviction_journal_before_inventory proves a fresh backend finishes a preinstalled journal before exposing inventory. No discoverable test injects the C++ finalize/unlink failure during a capacity-triggered replacement, requires the new write to remain successful, and then proves old absent/new exact after a fresh restart. Add cpp_parity_storage_backend_test_cpp_storagebackendtest_bucketbatchoffloadcontinuesafterfinalizefailure_118378bb with a Rust filesystem fault seam.",
+   "reason": "Rust bucket.rs::cpp_parity_bucket_batch_offload_continues_after_finalize_failure uses the exact 10-KiB quota and 6-KiB old/new values, proves the incoming reservation selects only old_key, and injects a permission-denied unlink after the accepted-eviction journal is durable. Production commit defers only that physical cleanup, returns success, exposes old as absent and new as exact B bytes, then a fresh backend consumes the journal before quota validation and proves old absent, new exact, and inventory size one.",
    "review": {
     "oracle": "mooncake-store/tests/storage_backend_test.cpp:3340-3432, C++ FinalizeEviction failure handling, and Rust BucketStorageBackend accepted journal/commit_write/recovery",
     "reviewed": true
    },
-   "rust": [],
-   "status": "missing"
+   "rust": [
+    {
+     "file": "mooncake-store-client/src/local_storage_backend/bucket.rs",
+     "test": "cpp_parity_bucket_batch_offload_continues_after_finalize_failure"
+    }
+   ],
+   "status": "covered"
   },
   {
    "behavior": "Returns/notifies despite finalize failure, restart scan empty.",
@@ -18438,13 +18443,22 @@
     "file": "storage_backend_test.cpp",
     "test": "StorageBackendTest.BucketWatermarkEvictionReturnsKeysAfterFinalizeFailure"
    },
-   "reason": "Partial evidence only: Rust PendingBucketEviction exposes selected keys and the accepted-eviction journal makes committed removals recoverable, but commit_eviction currently returns its cleanup error and no higher-layer test proves the C++ success-with-reported-victims contract after finalization failure. Add cpp_parity_storage_backend_test_cpp_storagebackendtest_bucketwatermarkevictionreturnskeysafterfinalizefailure_8b8fd555; inject unlink/finalize failure, preserve notified/returned victim identity at the replacement boundary, then fresh-restart and assert the victim absent and inventory empty.",
+   "reason": "Rust bucket.rs::cpp_parity_bucket_watermark_returns_victims_after_finalize_failure writes the exact 6-KiB W object under a 10-KiB quota, prepares the C++ 0.50/0.25 watermark eviction, preserves the exact returned victim, injects permission-denied unlink only after the accepted journal is durable, and proves successful commit plus empty restart inventory. storage_local.rs::cpp_parity_bucket_watermark_notifies_and_returns_victim_after_finalize_failure drives the production notification helper before that commit and exactly asserts tenant-a, user key watermark_key, LocalDisk replica type, and the accepted storage-key set; live lookup reports the victim absent despite deferred physical cleanup.",
    "review": {
     "oracle": "mooncake-store/tests/storage_backend_test.cpp:3435-3488, C++ watermark FinalizeEviction handling, and Rust BucketStorageBackend PendingBucketEviction/commit_eviction/accepted-journal recovery",
     "reviewed": true
    },
-   "rust": [],
-   "status": "missing"
+   "rust": [
+    {
+     "file": "mooncake-store-client/src/local_storage_backend/bucket.rs",
+     "test": "cpp_parity_bucket_watermark_returns_victims_after_finalize_failure"
+    },
+    {
+     "file": "mooncake-store-client/src/client/storage_local.rs",
+     "test": "cpp_parity_bucket_watermark_notifies_and_returns_victim_after_finalize_failure"
+    }
+   ],
+   "status": "covered"
   },
   {
    "behavior": "A failed watermark notification returns INTERNAL_ERROR and restores the oldest key; a successful retry then removes that key.",

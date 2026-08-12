@@ -247,6 +247,7 @@ pub struct BucketStorageBackend {
     reservations: Arc<BucketReservationRegistry>,
     next_token: AtomicU64,
     available_space_probe: Box<dyn Fn(&Path) -> std::io::Result<u64> + Send + Sync>,
+    remove_bucket_file: Box<dyn Fn(&Path) -> std::io::Result<()> + Send + Sync>,
 }
 
 impl BucketStorageBackend {
@@ -258,6 +259,16 @@ impl BucketStorageBackend {
         config: BucketStorageConfig,
         available_space_probe: impl Fn(&Path) -> std::io::Result<u64> + Send + Sync + 'static,
     ) -> Self {
+        Self::new_with_probes(config, available_space_probe, |path| {
+            std::fs::remove_file(path)
+        })
+    }
+
+    fn new_with_probes(
+        config: BucketStorageConfig,
+        available_space_probe: impl Fn(&Path) -> std::io::Result<u64> + Send + Sync + 'static,
+        remove_bucket_file: impl Fn(&Path) -> std::io::Result<()> + Send + Sync + 'static,
+    ) -> Self {
         Self {
             backend_id: Uuid::new_v4(),
             config,
@@ -267,6 +278,7 @@ impl BucketStorageBackend {
             reservations: Arc::new(BucketReservationRegistry::default()),
             next_token: AtomicU64::new(1),
             available_space_probe: Box::new(available_space_probe),
+            remove_bucket_file: Box::new(remove_bucket_file),
         }
     }
 
@@ -276,6 +288,18 @@ impl BucketStorageBackend {
         available_space_probe: impl Fn(&Path) -> std::io::Result<u64> + Send + Sync + 'static,
     ) -> Self {
         Self::new_with_probe(config, available_space_probe)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn new_with_bucket_remove(
+        config: BucketStorageConfig,
+        remove_bucket_file: impl Fn(&Path) -> std::io::Result<()> + Send + Sync + 'static,
+    ) -> Self {
+        Self::new_with_probes(
+            config,
+            |path| fs2::available_space(path),
+            remove_bucket_file,
+        )
     }
 
     pub(crate) fn is_enable_offloading(
@@ -417,6 +441,39 @@ impl BucketStorageBackend {
         })?;
         self.load_or_create_marker()?;
         let storage_id = self.load_or_create_storage_id()?;
+        let recovery_tombstones = self.read_accepted_eviction_journal()?.unwrap_or_default();
+        if recovery_tombstones.len() > self.config.total_keys_limit {
+            return Err(StoreError::InvalidParams(
+                "accepted eviction journal exceeds configured key limit".to_string(),
+            ));
+        }
+        let mut recovery_tombstone_map = HashMap::with_capacity(recovery_tombstones.len());
+        for record in &recovery_tombstones {
+            if record.storage_key.is_empty()
+                || record.storage_key.len() as u64 > self.config.bucket_size_limit
+            {
+                return Err(StoreError::InvalidParams(
+                    "accepted eviction journal contains an invalid key".to_string(),
+                ));
+            }
+            let generation_id = Uuid::parse_str(&record.generation_id).map_err(|error| {
+                StoreError::InvalidParams(format!(
+                    "invalid accepted eviction generation for {:?}: {error}",
+                    record.storage_key
+                ))
+            })?;
+            if generation_id.is_nil()
+                || recovery_tombstone_map
+                    .insert(record.storage_key.clone(), generation_id)
+                    .is_some()
+            {
+                return Err(StoreError::InvalidParams(
+                    "accepted eviction journal contains an invalid or duplicate key".to_string(),
+                ));
+            }
+        }
+        let mut recovered_tombstone_count = 0usize;
+        let mut recovered_tombstone_size = 0u64;
 
         let mut recovered = BucketState {
             initialized: false,
@@ -453,27 +510,65 @@ impl BucketStorageBackend {
                 )));
             }
             self.index_recovered_bucket(&mut recovered, &bucket)?;
+            for entry in &bucket.entries {
+                let generation_id = entry.generation()?;
+                if recovery_tombstone_map.get(&entry.storage_key) == Some(&generation_id) {
+                    recovered_tombstone_count += 1;
+                    recovered_tombstone_size = recovered_tombstone_size
+                        .checked_add(entry.logical_size()?)
+                        .ok_or_else(|| {
+                            StoreError::Internal(
+                                "accepted eviction recovery size overflow".to_string(),
+                            )
+                        })?;
+                }
+            }
+            if recovered
+                .records
+                .len()
+                .saturating_sub(recovered_tombstone_count)
+                > self.config.total_keys_limit
+            {
+                return Err(StoreError::InvalidParams(
+                    "recovered bucket key count exceeds configured limit".to_string(),
+                ));
+            }
+            if recovered.capacity_bytes > 0
+                && recovered
+                    .total_logical_size
+                    .saturating_sub(recovered_tombstone_size)
+                    > recovered.capacity_bytes
+            {
+                return Err(StoreError::InvalidParams(
+                    "recovered bucket data exceeds configured quota".to_string(),
+                ));
+            }
         }
         *self.state.lock() = recovered;
-        self.finish_accepted_eviction_journal()?;
-        self.state.lock().initialized = true;
+        self.finish_accepted_eviction_journal(recovery_tombstones)?;
+        let mut state = self.state.lock();
+        if state.records.len() > self.config.total_keys_limit {
+            return Err(StoreError::InvalidParams(
+                "recovered bucket key count exceeds configured limit".to_string(),
+            ));
+        }
+        if state.capacity_bytes > 0 && state.total_logical_size > state.capacity_bytes {
+            return Err(StoreError::InvalidParams(
+                "recovered bucket data exceeds configured quota".to_string(),
+            ));
+        }
+        state.initialized = true;
         Ok(())
     }
 
-    fn finish_accepted_eviction_journal(&self) -> StoreResult<()> {
+    fn finish_accepted_eviction_journal(
+        &self,
+        records: Vec<AcceptedEvictionRecord>,
+    ) -> StoreResult<()> {
         let path = self.accepted_eviction_journal_path();
-        let bytes = match std::fs::read(&path) {
-            Ok(bytes) => bytes,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-            Err(error) => return Err(error.into()),
-        };
-        let records: Vec<AcceptedEvictionRecord> =
-            serde_json::from_slice(&bytes).map_err(|error| {
-                StoreError::InvalidParams(format!(
-                    "invalid accepted eviction journal {}: {error}",
-                    path.display()
-                ))
-            })?;
+        if records.is_empty() && !path.exists() {
+            return Ok(());
+        }
         let mut state = self.state.lock();
         let mut snapshots = Vec::new();
         for record in records {
@@ -502,11 +597,65 @@ impl BucketStorageBackend {
                 None => {}
             }
         }
-        self.apply_record_snapshots_locked(&mut state, &snapshots)?;
+        self.apply_record_snapshots_locked(&mut state, &snapshots, false)?;
         std::fs::remove_file(&path)?;
         sync_directory(&self.backend_dir())?;
         state.accepted_tombstones.clear();
         Ok(())
+    }
+
+    fn read_accepted_eviction_journal(&self) -> StoreResult<Option<Vec<AcceptedEvictionRecord>>> {
+        let path = self.accepted_eviction_journal_path();
+        let metadata = match std::fs::symlink_metadata(&path) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => return Err(error.into()),
+        };
+        if !metadata.file_type().is_file() {
+            return Err(StoreError::InvalidParams(format!(
+                "accepted eviction journal is not a regular file: {}",
+                path.display()
+            )));
+        }
+        let mut file = match std::fs::File::open(&path) {
+            Ok(file) => file,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => return Err(error.into()),
+        };
+        let per_record_limit = self
+            .config
+            .bucket_size_limit
+            .checked_mul(6)
+            .and_then(|limit| limit.checked_add(128))
+            .ok_or_else(|| StoreError::Internal("journal size limit overflow".to_string()))?;
+        let byte_limit = per_record_limit
+            .checked_mul(u64::try_from(self.config.total_keys_limit).map_err(|_| {
+                StoreError::Internal("journal key limit conversion overflow".to_string())
+            })?)
+            .and_then(|limit| limit.checked_add(2))
+            .ok_or_else(|| StoreError::Internal("journal size limit overflow".to_string()))?;
+        if metadata.len() > byte_limit {
+            return Err(StoreError::InvalidParams(format!(
+                "accepted eviction journal exceeds byte limit {byte_limit}"
+            )));
+        }
+        let capacity = usize::try_from(metadata.len()).map_err(|_| {
+            StoreError::InvalidParams("accepted eviction journal is too large".to_string())
+        })?;
+        let mut bytes = Vec::with_capacity(capacity);
+        let mut limited = std::io::Read::take(&mut file, byte_limit.saturating_add(1));
+        std::io::Read::read_to_end(&mut limited, &mut bytes)?;
+        if bytes.len() as u64 > byte_limit {
+            return Err(StoreError::InvalidParams(format!(
+                "accepted eviction journal exceeds byte limit {byte_limit}"
+            )));
+        }
+        serde_json::from_slice(&bytes).map(Some).map_err(|error| {
+            StoreError::InvalidParams(format!(
+                "invalid accepted eviction journal {}: {error}",
+                path.display()
+            ))
+        })
     }
 
     fn load_or_create_marker(&self) -> StoreResult<()> {
@@ -620,16 +769,6 @@ impl BucketStorageBackend {
                 last_access_seq: bucket.last_access_seq,
             },
         );
-        if state.records.len() > self.config.total_keys_limit {
-            return Err(StoreError::InvalidParams(
-                "recovered bucket key count exceeds configured limit".to_string(),
-            ));
-        }
-        if state.capacity_bytes > 0 && state.total_logical_size > state.capacity_bytes {
-            return Err(StoreError::InvalidParams(
-                "recovered bucket data exceeds configured quota".to_string(),
-            ));
-        }
         Ok(())
     }
 
@@ -1098,10 +1237,12 @@ impl BucketStorageBackend {
             .iter()
             .map(|snapshot| (snapshot.storage_key.clone(), snapshot.record.generation_id))
             .collect();
-        self.apply_record_snapshots_locked(&mut state, snapshots)?;
-        std::fs::remove_file(self.accepted_eviction_journal_path())?;
-        sync_directory(&self.backend_dir())?;
-        state.accepted_tombstones.clear();
+        let finalize_deferred = self.apply_record_snapshots_locked(&mut state, snapshots, true)?;
+        if !finalize_deferred {
+            std::fs::remove_file(self.accepted_eviction_journal_path())?;
+            sync_directory(&self.backend_dir())?;
+            state.accepted_tombstones.clear();
+        }
         Ok(())
     }
 
@@ -1109,10 +1250,12 @@ impl BucketStorageBackend {
         &self,
         state: &mut BucketState,
         snapshots: &[BucketRecordSnapshot],
-    ) -> StoreResult<()> {
+        allow_deferred_unlink: bool,
+    ) -> StoreResult<bool> {
         if snapshots.is_empty() {
-            return Ok(());
+            return Ok(false);
         }
+        let mut finalize_deferred = false;
         let mut by_bucket: BTreeMap<u64, Vec<&BucketRecordSnapshot>> = BTreeMap::new();
         for snapshot in snapshots {
             by_bucket
@@ -1138,9 +1281,17 @@ impl BucketStorageBackend {
                 .entries
                 .retain(|entry| !accepted.contains(entry.storage_key.as_str()));
             if bucket.entries.is_empty() {
-                match std::fs::remove_file(self.bucket_path(bucket_id)) {
+                match (self.remove_bucket_file)(&self.bucket_path(bucket_id)) {
                     Ok(()) => sync_directory(&self.bucket_dir())?,
                     Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                    Err(error) if allow_deferred_unlink => {
+                        tracing::warn!(
+                            bucket_id,
+                            %error,
+                            "deferring accepted bucket eviction finalization to restart"
+                        );
+                        finalize_deferred = true;
+                    }
                     Err(error) => return Err(error.into()),
                 }
                 state.buckets.remove(&bucket_id);
@@ -1165,7 +1316,7 @@ impl BucketStorageBackend {
                 state.records.remove(&snapshot.storage_key);
             }
         }
-        Ok(())
+        Ok(finalize_deferred)
     }
 
     pub(crate) fn read_object(&self, storage_key: &str) -> StoreResult<Vec<u8>> {
@@ -2193,5 +2344,124 @@ mod tests {
         let recovered = BucketStorageBackend::new(config);
         assert!(recovered.scan_records().unwrap().is_empty());
         assert!(!recovered.accepted_eviction_journal_path().exists());
+    }
+
+    #[test]
+    fn cpp_parity_bucket_batch_offload_continues_after_finalize_failure() {
+        let root = TempDir::new().unwrap();
+        let mut config = config(&root);
+        config.bucket_keys_limit = 10;
+        config.bucket_size_limit = 8 * 1024;
+        config.quota_bytes = 10 * 1024;
+        let failed_once = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let failure = Arc::clone(&failed_once);
+        let backend = BucketStorageBackend::new_with_bucket_remove(config.clone(), move |path| {
+            if !failure.swap(true, Ordering::SeqCst) {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::PermissionDenied,
+                    "injected bucket unlink failure",
+                ));
+            }
+            std::fs::remove_file(path)
+        });
+        let old = vec![b'A'; 6 * 1024];
+        let new = vec![b'B'; 6 * 1024];
+        write(&backend, "old_key", &old, Uuid::new_v4());
+
+        let pending = backend.prepare_write("new_key", new.len() as u64).unwrap();
+        assert_eq!(pending.keys(), ["old_key"]);
+        backend
+            .commit_write_with_generation("new_key", &new, pending, Uuid::new_v4())
+            .unwrap();
+
+        assert!(failed_once.load(Ordering::SeqCst));
+        assert!(matches!(
+            backend.read_object("old_key"),
+            Err(StoreError::KeyNotFound(key)) if key == "old_key"
+        ));
+        assert_eq!(backend.read_object("new_key").unwrap(), new);
+        drop(backend);
+
+        let restarted = BucketStorageBackend::new(config);
+        let restarted_old = restarted.read_object("old_key");
+        assert!(
+            matches!(restarted_old, Err(StoreError::KeyNotFound(ref key)) if key == "old_key"),
+            "unexpected restarted old-key result: {restarted_old:?}"
+        );
+        assert_eq!(restarted.read_object("new_key").unwrap(), new);
+        assert_eq!(restarted.scan_records().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn cpp_parity_bucket_watermark_returns_victims_after_finalize_failure() {
+        let root = TempDir::new().unwrap();
+        let mut config = config(&root);
+        config.bucket_keys_limit = 10;
+        config.bucket_size_limit = 8 * 1024;
+        config.quota_bytes = 10 * 1024;
+        let failed_once = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let failure = Arc::clone(&failed_once);
+        let backend = BucketStorageBackend::new_with_bucket_remove(config.clone(), move |path| {
+            if !failure.swap(true, Ordering::SeqCst) {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::PermissionDenied,
+                    "injected watermark bucket unlink failure",
+                ));
+            }
+            std::fs::remove_file(path)
+        });
+        write(&backend, "watermark_key", &[b'W'; 6 * 1024], Uuid::new_v4());
+
+        let pending = backend.prepare_watermark_eviction(0.50, 0.25).unwrap();
+        let returned_keys = pending.keys();
+        assert_eq!(returned_keys, ["watermark_key"]);
+        backend.commit_eviction(pending).unwrap();
+
+        assert!(failed_once.load(Ordering::SeqCst));
+        assert!(matches!(
+            backend.read_object("watermark_key"),
+            Err(StoreError::KeyNotFound(key)) if key == "watermark_key"
+        ));
+        drop(backend);
+
+        let restarted = BucketStorageBackend::new(config);
+        assert!(restarted.scan_records().unwrap().is_empty());
+        assert!(matches!(
+            restarted.read_object("watermark_key"),
+            Err(StoreError::KeyNotFound(key)) if key == "watermark_key"
+        ));
+    }
+
+    #[test]
+    fn deferred_eviction_journal_accepts_json_escaped_storage_key() {
+        let root = TempDir::new().unwrap();
+        let mut config = config(&root);
+        config.bucket_size_limit = 8 * 1024;
+        config.quota_bytes = 10 * 1024;
+        let failed_once = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let failure = Arc::clone(&failed_once);
+        let backend = BucketStorageBackend::new_with_bucket_remove(config.clone(), move |path| {
+            if !failure.swap(true, Ordering::SeqCst) {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::PermissionDenied,
+                    "injected escaped-key unlink failure",
+                ));
+            }
+            std::fs::remove_file(path)
+        });
+        let escaped_key = "\"\\\n\r\t".repeat(200);
+        write(&backend, &escaped_key, &[b'E'; 5 * 1024], Uuid::new_v4());
+        let pending = backend.prepare_watermark_eviction(0.50, 0.25).unwrap();
+        assert_eq!(pending.keys(), [escaped_key.clone()]);
+        backend.commit_eviction(pending).unwrap();
+        assert!(failed_once.load(Ordering::SeqCst));
+        drop(backend);
+
+        let restarted = BucketStorageBackend::new(config);
+        assert!(restarted.scan_records().unwrap().is_empty());
+        assert!(matches!(
+            restarted.read_object(&escaped_key),
+            Err(StoreError::KeyNotFound(key)) if key == escaped_key
+        ));
     }
 }

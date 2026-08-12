@@ -2992,6 +2992,72 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn cpp_parity_bucket_watermark_notifies_and_returns_victim_after_finalize_failure() {
+        let root = tempfile::tempdir().unwrap();
+        let failed_once = Arc::new(AtomicBool::new(false));
+        let failure = Arc::clone(&failed_once);
+        let bucket = Arc::new(BucketStorageBackend::new_with_bucket_remove(
+            BucketStorageConfig {
+                root_dir: root.path().to_path_buf(),
+                fsdir: "bucket-watermark-finalize-failure".to_string(),
+                bucket_size_limit: 8 * 1024,
+                bucket_keys_limit: 10,
+                eviction_policy: BucketEvictionPolicy::Fifo,
+                quota_bytes: 10 * 1024,
+                total_keys_limit: 100,
+            },
+            move |path| {
+                if !failure.swap(true, Ordering::SeqCst) {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::PermissionDenied,
+                        "injected watermark bucket unlink failure",
+                    ));
+                }
+                std::fs::remove_file(path)
+            },
+        ));
+        let storage = AttachedLocalStorage::Bucket(Arc::clone(&bucket));
+        let storage_key = local_storage_key("tenant-a", "watermark_key");
+        let pending_write = storage.prepare_write(&storage_key, 6 * 1024).unwrap();
+        storage
+            .commit_write(
+                &storage_key,
+                &[b'W'; 6 * 1024],
+                pending_write,
+                Uuid::new_v4(),
+            )
+            .unwrap();
+
+        let pending = storage.prepare_watermark_eviction(0.50, 0.25).unwrap();
+        let returned_keys = pending.keys();
+        assert_eq!(returned_keys, [storage_key.clone()]);
+        let mut notifier = RecordingSuccessEvictionNotifier::default();
+        let accepted = notify_evicted_disk_replicas_with(
+            &mut notifier,
+            &returned_keys,
+            proto::replica_descriptor::ReplicaType::LocalDisk as i32,
+        )
+        .await
+        .unwrap();
+        assert_eq!(accepted, HashSet::from([storage_key.clone()]));
+        assert_eq!(
+            notifier.calls,
+            [(
+                "tenant-a".to_string(),
+                vec!["watermark_key".to_string()],
+                proto::replica_descriptor::ReplicaType::LocalDisk as i32,
+            )]
+        );
+        storage.commit_eviction(pending).unwrap();
+
+        assert!(failed_once.load(Ordering::SeqCst));
+        assert!(matches!(
+            storage.read_object(&storage_key),
+            Err(StoreError::KeyNotFound(key)) if key == storage_key
+        ));
+    }
+
+    #[tokio::test]
     async fn cpp_parity_notify_evicted_disk_replicas_routes_same_key_by_tenant() {
         let tenant_a_key = local_storage_key("tenant-a", "shared-key");
         let tenant_b_key = local_storage_key("tenant-b", "shared-key");
