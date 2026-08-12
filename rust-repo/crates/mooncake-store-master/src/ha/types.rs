@@ -76,6 +76,48 @@ pub enum LeaderRole {
     Standby,
 }
 
+/// A backend keepalive failure observed for one concrete leadership session.
+/// Explicit release and keepalive-handle cancellation do not produce this
+/// event.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LeadershipLossEvent {
+    pub owner_token: String,
+    pub view_version: u64,
+}
+
+/// Loss-event receiver bound to one concrete leadership session.
+pub struct LeadershipLossReceiver {
+    pub(crate) receiver: tokio::sync::broadcast::Receiver<LeadershipLossEvent>,
+    pub(crate) owner_token: String,
+    pub(crate) view_version: u64,
+}
+
+impl LeadershipLossReceiver {
+    pub(crate) fn new(
+        receiver: tokio::sync::broadcast::Receiver<LeadershipLossEvent>,
+        session: &LeadershipSession,
+    ) -> Self {
+        Self {
+            receiver,
+            owner_token: session.owner_token.clone(),
+            view_version: session.view.view_version,
+        }
+    }
+
+    /// Wait for a loss event for this receiver's exact session, ignoring
+    /// events published for later leadership terms.
+    pub async fn recv(
+        &mut self,
+    ) -> Result<LeadershipLossEvent, tokio::sync::broadcast::error::RecvError> {
+        loop {
+            let event = self.receiver.recv().await?;
+            if event.owner_token == self.owner_token && event.view_version == self.view_version {
+                return Ok(event);
+            }
+        }
+    }
+}
+
 // ----------------------------------------------------------------------------
 // HABackendType — configurable HA backends / 可配置的 HA 后端
 //

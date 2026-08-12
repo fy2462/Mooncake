@@ -1,11 +1,13 @@
-use super::coordinator_common::{clear_active_owner_token_if_matches, resolve_cluster_namespace};
+use super::coordinator_common::{
+    SharedLeadershipSessionState, report_leadership_loss_if_active, resolve_cluster_namespace,
+};
 use crate::ha::types::{
-    AcquireLeadershipResult, HaError, LeaderRole, LeadershipSession, MasterView,
+    AcquireLeadershipResult, HaError, LeaderRole, LeadershipLossEvent, LeadershipSession,
+    MasterView,
 };
 use etcd_client::{Compare, CompareOp, PutOptions, Txn, TxnOp};
-use std::sync::{Arc, Mutex};
 use std::time::Duration;
-use tokio::sync::watch;
+use tokio::sync::{broadcast, watch};
 use tracing::{error, info};
 
 pub(super) fn build_master_view_key(cluster_namespace: &str) -> String {
@@ -260,13 +262,14 @@ pub(super) fn start_keepalive(
     client: &etcd_client::Client,
     session: &LeadershipSession,
     role_tx: watch::Sender<LeaderRole>,
-    active_owner_token: Arc<Mutex<Option<String>>>,
+    loss_tx: broadcast::Sender<LeadershipLossEvent>,
+    session_state: SharedLeadershipSessionState,
     mut cancel_rx: tokio::sync::oneshot::Receiver<()>,
 ) -> Result<(), HaError> {
     super::coordinator_common::validate_session(session)?;
     let mut client = client.clone();
     let lease_id = parse_lease_id(session)?;
-    let owner_token = session.owner_token.clone();
+    let loss_session = session.clone();
     let keepalive_interval = keepalive_interval(session.lease_ttl);
     let acknowledgement_timeout = keepalive_ack_timeout(session.lease_ttl);
     tokio::spawn(async move {
@@ -274,8 +277,7 @@ pub(super) fn start_keepalive(
             Ok(res) => res,
             Err(e) => {
                 error!("Failed to create lease keepalive: {}", e);
-                let _ = role_tx.send(LeaderRole::Standby);
-                clear_active_owner_token_if_matches(&active_owner_token, &owner_token);
+                report_leadership_loss_if_active(&session_state, &loss_session, &role_tx, &loss_tx);
                 return;
             }
         };
@@ -285,8 +287,7 @@ pub(super) fn start_keepalive(
                 lease_id,
                 keeper.id()
             );
-            let _ = role_tx.send(LeaderRole::Standby);
-            clear_active_owner_token_if_matches(&active_owner_token, &owner_token);
+            report_leadership_loss_if_active(&session_state, &loss_session, &role_tx, &loss_tx);
             return;
         }
         loop {
@@ -294,8 +295,7 @@ pub(super) fn start_keepalive(
                 _ = tokio::time::sleep(keepalive_interval) => {
                     if let Err(e) = keeper.keep_alive().await {
                         error!("Lease keepalive error: {}, leadership lost", e);
-                        let _ = role_tx.send(LeaderRole::Standby);
-                        clear_active_owner_token_if_matches(&active_owner_token, &owner_token);
+                        report_leadership_loss_if_active(&session_state, &loss_session, &role_tx, &loss_tx);
                         return;
                     }
                     let response = tokio::select! {
@@ -323,38 +323,22 @@ pub(super) fn start_keepalive(
                                 response.id(),
                                 response.ttl()
                             );
-                            let _ = role_tx.send(LeaderRole::Standby);
-                            clear_active_owner_token_if_matches(
-                                &active_owner_token,
-                                &owner_token,
-                            );
+                            report_leadership_loss_if_active(&session_state, &loss_session, &role_tx, &loss_tx);
                             return;
                         }
                         Ok(Ok(None)) => {
                             error!("Lease keepalive stream closed, leadership lost");
-                            let _ = role_tx.send(LeaderRole::Standby);
-                            clear_active_owner_token_if_matches(
-                                &active_owner_token,
-                                &owner_token,
-                            );
+                            report_leadership_loss_if_active(&session_state, &loss_session, &role_tx, &loss_tx);
                             return;
                         }
                         Ok(Err(error)) => {
                             error!("Lease keepalive acknowledgement failed: {error}");
-                            let _ = role_tx.send(LeaderRole::Standby);
-                            clear_active_owner_token_if_matches(
-                                &active_owner_token,
-                                &owner_token,
-                            );
+                            report_leadership_loss_if_active(&session_state, &loss_session, &role_tx, &loss_tx);
                             return;
                         }
                         Err(_) => {
                             error!("Lease keepalive acknowledgement timed out, leadership lost");
-                            let _ = role_tx.send(LeaderRole::Standby);
-                            clear_active_owner_token_if_matches(
-                                &active_owner_token,
-                                &owner_token,
-                            );
+                            report_leadership_loss_if_active(&session_state, &loss_session, &role_tx, &loss_tx);
                             return;
                         }
                     }

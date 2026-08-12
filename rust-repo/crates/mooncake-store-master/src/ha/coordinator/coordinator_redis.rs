@@ -1,10 +1,12 @@
-use super::coordinator_common::{clear_active_owner_token_if_matches, validate_session};
-use crate::ha::types::{
-    AcquireLeadershipResult, HaError, LeaderRole, LeadershipSession, MasterView,
+use super::coordinator_common::{
+    SharedLeadershipSessionState, report_leadership_loss_if_active, validate_session,
 };
-use std::sync::{Arc, Mutex};
+use crate::ha::types::{
+    AcquireLeadershipResult, HaError, LeaderRole, LeadershipLossEvent, LeadershipSession,
+    MasterView,
+};
 use std::time::Duration;
-use tokio::sync::watch;
+use tokio::sync::{broadcast, watch};
 use tracing::{error, info};
 use uuid::Uuid;
 
@@ -200,7 +202,8 @@ pub(super) async fn start_keepalive(
     election_key: &str,
     session: &LeadershipSession,
     role_tx: watch::Sender<LeaderRole>,
-    active_owner_token: Arc<Mutex<Option<String>>>,
+    loss_tx: broadcast::Sender<LeadershipLossEvent>,
+    session_state: SharedLeadershipSessionState,
     mut cancel_rx: tokio::sync::oneshot::Receiver<()>,
 ) -> Result<(), HaError> {
     validate_session(session)?;
@@ -208,14 +211,14 @@ pub(super) async fn start_keepalive(
     let keepalive_interval = redis_keepalive_interval(session.lease_ttl)?;
     let owner_token = session.owner_token.clone();
     if let Err(error) = client.get_multiplexed_async_connection().await {
-        let _ = role_tx.send(LeaderRole::Standby);
-        clear_active_owner_token_if_matches(&active_owner_token, &owner_token);
+        report_leadership_loss_if_active(&session_state, session, &role_tx, &loss_tx);
         return Err(HaError::InvalidBackend(format!(
             "redis keepalive connect: {error}"
         )));
     }
     let ek = election_key.to_string();
     let client2 = client.clone();
+    let loss_session = session.clone();
     tokio::spawn(async move {
         loop {
             tokio::select! {
@@ -224,8 +227,7 @@ pub(super) async fn start_keepalive(
                         Ok(connection) => connection,
                         Err(error) => {
                             error!("Redis keepalive reconnect failed: {error}");
-                            let _ = role_tx.send(LeaderRole::Standby);
-                            clear_active_owner_token_if_matches(&active_owner_token, &owner_token);
+                            report_leadership_loss_if_active(&session_state, &loss_session, &role_tx, &loss_tx);
                             return;
                         }
                     };
@@ -238,8 +240,7 @@ pub(super) async fn start_keepalive(
                         .query_async(&mut connection)
                         .await;
                     if result.ok() != Some(1) {
-                        let _ = role_tx.send(LeaderRole::Standby);
-                        clear_active_owner_token_if_matches(&active_owner_token, &owner_token);
+                        report_leadership_loss_if_active(&session_state, &loss_session, &role_tx, &loss_tx);
                         return;
                     }
                 }

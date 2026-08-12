@@ -332,6 +332,7 @@ async fn cpp_parity_high_availability_test_leadership_monitor_reports_keepalive_
     let session = acquired.session.unwrap();
     coordinator.try_renew_leadership(&session).await.unwrap();
     let mut role = coordinator.subscribe_role_for_session(&session).unwrap();
+    let mut loss = coordinator.subscribe_loss_for_session(&session).unwrap();
     assert_eq!(*role.borrow(), LeaderRole::Leader);
     let keepalive = coordinator
         .start_leadership_keepalive(&session)
@@ -351,8 +352,50 @@ async fn cpp_parity_high_availability_test_leadership_monitor_reports_keepalive_
     })
     .await
     .expect("keepalive loss demotes the production role receiver within five seconds");
+    let loss_event = tokio::time::timeout(Duration::from_secs(5), loss.recv())
+        .await
+        .expect("keepalive loss publishes a session loss event within five seconds")
+        .unwrap();
+    assert_eq!(loss_event.owner_token, session.owner_token);
+    assert_eq!(loss_event.view_version, session.view.view_version);
     assert_eq!(*role.borrow(), LeaderRole::Standby);
     assert!(coordinator.read_current_view().await.unwrap().is_none());
+    drop(keepalive);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn cpp_parity_high_availability_test_leadership_monitor_ignores_explicit_release() {
+    if !live_etcd_enabled() {
+        eprintln!("skipping live etcd oplog e2e; set MOONCAKE_ETCD_OPLOG_E2E=1 to enable");
+        return;
+    }
+
+    let namespace = format!("ha-etcd-view-release-{}", Uuid::new_v4().simple());
+    let coordinator = LeaderCoordinator::new_etcd(vec![live_etcd_endpoint()], &namespace)
+        .await
+        .unwrap();
+    let acquired = coordinator
+        .try_acquire_leadership("0.0.0.0:6666", 3)
+        .await
+        .unwrap();
+    assert!(acquired.acquired);
+    let session = acquired.session.unwrap();
+    coordinator.try_renew_leadership(&session).await.unwrap();
+    let mut loss = coordinator.subscribe_loss_for_session(&session).unwrap();
+    let keepalive = coordinator
+        .start_leadership_keepalive(&session)
+        .await
+        .unwrap();
+
+    coordinator.release_leadership(&session).await.unwrap();
+    assert_eq!(*coordinator.subscribe_role().borrow(), LeaderRole::Standby);
+    assert!(coordinator.read_current_view().await.unwrap().is_none());
+    assert!(
+        tokio::time::timeout(Duration::from_secs(1), loss.recv())
+            .await
+            .is_err(),
+        "explicit release must not publish a leadership-loss event"
+    );
     drop(keepalive);
 }
 

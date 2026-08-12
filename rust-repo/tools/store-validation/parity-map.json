@@ -9598,7 +9598,7 @@
     "file": "ha/leadership/high_availability_test.cpp",
     "test": "HighAvailabilityTest.LeadershipMonitorReportsKeepAliveLoss"
    },
-   "reason": "cpp_parity_high_availability_test_leadership_monitor_reports_keepalive_loss uses a production coordinator and unique live-etcd namespace. After acquisition, renewal, and keepalive startup, an independent etcd client revokes the exact session lease; the session-scoped production role receiver changes from Leader to Standby within five seconds and the master view is absent. Rust exposes role demotion rather than C++'s loss-reason callback, giving the same observable leadership-loss outcome.",
+   "reason": "cpp_parity_high_availability_test_leadership_monitor_reports_keepalive_loss uses a production coordinator and unique live-etcd namespace. After acquisition, renewal, and keepalive startup, an independent etcd client revokes the exact session lease; within five seconds the session-scoped role receiver becomes Standby and the new loss receiver reports the exact owner token/view version, while the master view is absent. The same atomic production helper is used by etcd, Redis, and K8s keepalive failures and rejects stale-session reports.",
    "review": {
     "oracle": "high_availability_test.cpp LeadershipMonitorReportsKeepAliveLoss and coordinator_etcd.rs keepalive task",
     "reviewed": true
@@ -9712,13 +9712,18 @@
     "file": "ha/leadership/high_availability_test.cpp",
     "test": "HighAvailabilityTest.LeadershipMonitorIgnoresExplicitRelease"
    },
-   "reason": "Rust release publishes Standby while keepalive cancellation is separate, but there is no callback distinction and no discoverable real-etcd test proving explicit-release-versus-loss behavior.",
+   "reason": "cpp_parity_high_availability_test_leadership_monitor_ignores_explicit_release uses a production coordinator and unique live-etcd namespace. It acquires, renews, subscribes to the session-specific loss channel, starts keepalive, explicitly releases the lease, proves the ordinary role is Standby and the view absent, then waits the C++ oracle's full one second and proves no loss event arrives. Production release suppresses loss before revocation, while backend keepalive failures alone publish exact session identity.",
    "review": {
     "oracle": "high_availability_test.cpp LeadershipMonitorIgnoresExplicitRelease and LeaderCoordinator::release_leadership",
     "reviewed": true
    },
-   "rust": [],
-   "status": "missing"
+   "rust": [
+    {
+     "file": "mooncake-store-master/tests/test_etcd_oplog_live.rs",
+     "test": "cpp_parity_high_availability_test_leadership_monitor_ignores_explicit_release"
+    }
+   ],
+   "status": "covered"
   },
   {
    "behavior": "etcd persistence supports put/get, create-CAS success then conflict, ordered prefix first/last, an exclusive range containing a and b but not c, and range deletion leaving every key absent.",

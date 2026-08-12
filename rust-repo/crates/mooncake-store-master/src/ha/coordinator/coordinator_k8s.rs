@@ -1,4 +1,6 @@
-use super::coordinator_common::{clear_active_owner_token_if_matches, validate_session};
+use super::coordinator_common::{
+    SharedLeadershipSessionState, report_leadership_loss_if_active_with, validate_session,
+};
 use super::*;
 use crate::ha::types::K8sPodIdentity;
 use futures_util::{StreamExt, pin_mut};
@@ -9,8 +11,8 @@ use kube::api::{Patch, PatchParams, PostParams, WatchEvent, WatchParams};
 use kube::{Api, Client, ResourceExt};
 use serde_json::json;
 use std::future::Future;
-use std::sync::{Arc, Mutex};
-use tokio::sync::watch;
+use std::sync::Arc;
+use tokio::sync::{broadcast, watch};
 use tracing::{error, info, warn};
 
 const K8S_OPERATION_MAX_ATTEMPTS: usize = 5;
@@ -368,12 +370,12 @@ pub(super) fn start_k8s_keepalive(
     lease_name: &str,
     session: &LeadershipSession,
     role_tx: watch::Sender<LeaderRole>,
-    active_owner_token: Arc<Mutex<Option<String>>>,
+    loss_tx: broadcast::Sender<LeadershipLossEvent>,
+    session_state: SharedLeadershipSessionState,
     label_reconciler: Option<K8sLeaderLabelReconciler>,
     mut cancel_rx: tokio::sync::oneshot::Receiver<()>,
 ) -> Result<(), HaError> {
     validate_session(session)?;
-    let owner_token = session.owner_token.clone();
     let namespace = namespace.to_string();
     let lease_name = lease_name.to_string();
     let session = session.clone();
@@ -384,9 +386,13 @@ pub(super) fn start_k8s_keepalive(
                 _ = tokio::time::sleep(sleep_for) => {
                     if let Err(e) = renew_k8s_lease(&namespace, &lease_name, &session).await {
                         error!("K8s lease keepalive failed: {}, leadership lost", e);
-                        set_k8s_leader_label(&label_reconciler, false);
-                        let _ = role_tx.send(LeaderRole::Standby);
-                        clear_active_owner_token_if_matches(&active_owner_token, &owner_token);
+                        report_leadership_loss_if_active_with(
+                            &session_state,
+                            &session,
+                            &role_tx,
+                            &loss_tx,
+                            || set_k8s_leader_label(&label_reconciler, false),
+                        );
                         return;
                     }
                 }

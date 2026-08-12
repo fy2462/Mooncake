@@ -1,10 +1,9 @@
 use super::types::{
     AcquireLeadershipResult, HaError, K8sPodIdentity, LeaderRole, LeadershipHandle,
-    LeadershipSession, MasterView,
+    LeadershipLossEvent, LeadershipLossReceiver, LeadershipSession, MasterView,
 };
-use std::sync::{Arc, Mutex};
 use std::time::Duration;
-use tokio::sync::watch;
+use tokio::sync::{broadcast, watch};
 use tracing::info;
 
 mod coordinator_common;
@@ -14,6 +13,7 @@ mod coordinator_redis;
 #[doc(hidden)]
 pub mod test_support;
 
+use coordinator_common::SharedLeadershipSessionState;
 use coordinator_common::{resolve_cluster_namespace, validate_session};
 use coordinator_k8s::{
     K8sLeaderLabelReconciler, acquire_k8s_lease, parse_k8s_lease_connstring, read_k8s_view,
@@ -30,8 +30,10 @@ pub struct LeaderCoordinator {
     role_tx: watch::Sender<LeaderRole>,
     /// Receiver side of the role change watch channel. / 角色变更 watch channel 的接收端。
     role_rx: watch::Receiver<LeaderRole>,
-    /// Owner token currently tied to the keepalive session.
-    active_owner_token: Arc<Mutex<Option<String>>>,
+    /// Identity and explicit-release suppression for the active session.
+    session_state: SharedLeadershipSessionState,
+    /// Keepalive failures only; explicit release/cancellation never publish.
+    loss_tx: broadcast::Sender<LeadershipLossEvent>,
 }
 
 /// Supported coordinator backends. / 支持的协调器后端。
@@ -63,11 +65,13 @@ impl LeaderCoordinator {
     /// Shared constructor for all backends. / 所有后端的共享构造函数。
     fn with_backend(backend: CoordinatorBackend, initial_role: LeaderRole) -> Self {
         let (role_tx, role_rx) = watch::channel(initial_role);
+        let (loss_tx, _) = broadcast::channel(16);
         Self {
             backend,
             role_tx,
             role_rx,
-            active_owner_token: Arc::new(Mutex::new(None)),
+            session_state: Default::default(),
+            loss_tx,
         }
     }
 
@@ -128,12 +132,14 @@ impl LeaderCoordinator {
     /// 返回协调器和用于外部角色操作的 Sender。
     pub fn new_manual(initial_role: LeaderRole) -> (Self, watch::Sender<LeaderRole>) {
         let (role_tx, role_rx) = watch::channel(initial_role);
+        let (loss_tx, _) = broadcast::channel(16);
         (
             Self {
                 backend: CoordinatorBackend::Manual,
                 role_tx: role_tx.clone(),
                 role_rx,
-                active_owner_token: Arc::new(Mutex::new(None)),
+                session_state: Default::default(),
+                loss_tx,
             },
             role_tx,
         )
@@ -174,9 +180,10 @@ impl LeaderCoordinator {
         lease_ttl_secs: i64,
     ) -> Result<AcquireLeadershipResult, HaError> {
         if self
-            .active_owner_token
+            .session_state
             .lock()
             .expect("active owner token mutex poisoned")
+            .active_owner_token
             .is_some()
         {
             return Err(HaError::UnavailableInCurrentStatus);
@@ -266,7 +273,8 @@ impl LeaderCoordinator {
                     client,
                     session,
                     self.role_tx.clone(),
-                    self.active_owner_token.clone(),
+                    self.loss_tx.clone(),
+                    self.session_state.clone(),
                     cancel_rx,
                 )?;
             }
@@ -281,7 +289,8 @@ impl LeaderCoordinator {
                     election_key,
                     session,
                     self.role_tx.clone(),
-                    self.active_owner_token.clone(),
+                    self.loss_tx.clone(),
+                    self.session_state.clone(),
                     cancel_rx,
                 )
                 .await?;
@@ -296,7 +305,8 @@ impl LeaderCoordinator {
                     lease_name,
                     session,
                     self.role_tx.clone(),
-                    self.active_owner_token.clone(),
+                    self.loss_tx.clone(),
+                    self.session_state.clone(),
                     label_reconciler.clone(),
                     cancel_rx,
                 )?;
@@ -337,7 +347,7 @@ impl LeaderCoordinator {
     /// - Redis: deletes the leader hash only if owner_token matches.
     /// - Manual: sends Standby via watch channel. / 通过 watch channel 发送 Standby。
     pub async fn release_leadership(&self, session: &LeadershipSession) -> Result<(), HaError> {
-        self.ensure_release_session_matches(session)?;
+        self.begin_explicit_release(session)?;
         let backend_result = match &self.backend {
             CoordinatorBackend::Etcd { client, .. } => {
                 coordinator_etcd::release(client, session).await
@@ -362,8 +372,21 @@ impl LeaderCoordinator {
         };
         // Local demotion is unconditional: a revoke error means the remote
         // lease may survive until TTL, not that this process may keep serving.
-        let _ = self.role_tx.send(LeaderRole::Standby);
-        self.set_active_owner_token(None);
+        // Keep the identity check, role update, and clear atomic with respect
+        // to a concurrent acquisition and a delayed old keepalive task.
+        {
+            let mut state = self
+                .session_state
+                .lock()
+                .expect("leadership session state mutex poisoned");
+            if state.active_owner_token.as_deref() == Some(session.owner_token.as_str()) {
+                let _ = self.role_tx.send(LeaderRole::Standby);
+                state.active_owner_token = None;
+            }
+            if state.loss_suppressed_owner_token.as_deref() == Some(session.owner_token.as_str()) {
+                state.loss_suppressed_owner_token = None;
+            }
+        }
         if backend_result.is_ok() && matches!(&self.backend, CoordinatorBackend::K8s { .. }) {
             info!("K8s leadership released");
         }
@@ -421,6 +444,29 @@ impl LeaderCoordinator {
             return Err(HaError::UnavailableInCurrentStatus);
         }
         Ok(self.role_rx.clone())
+    }
+
+    /// Subscribe to keepalive failures for the active session. Explicit
+    /// release and keepalive-handle cancellation do not produce events.
+    pub fn subscribe_loss_for_session(
+        &self,
+        session: &LeadershipSession,
+    ) -> Result<LeadershipLossReceiver, HaError> {
+        let state = self
+            .session_state
+            .lock()
+            .expect("leadership session state mutex poisoned");
+        if state.active_owner_token.as_deref() != Some(session.owner_token.as_str())
+            || state.loss_suppressed_owner_token.as_deref() == Some(session.owner_token.as_str())
+        {
+            return Err(HaError::UnavailableInCurrentStatus);
+        }
+        // `report_leadership_loss_if_active` uses the same mutex, so the
+        // receiver exists before the one-shot loss publication can occur.
+        Ok(LeadershipLossReceiver::new(
+            self.loss_tx.subscribe(),
+            session,
+        ))
     }
 
     /// Wait for a role assignment from the backend. Returns the current role.
@@ -483,10 +529,12 @@ impl LeaderCoordinator {
     }
 
     fn set_active_owner_token(&self, token: Option<String>) {
-        *self
-            .active_owner_token
+        let mut state = self
+            .session_state
             .lock()
-            .expect("active owner token mutex poisoned") = token;
+            .expect("leadership session state mutex poisoned");
+        state.active_owner_token = token;
+        state.loss_suppressed_owner_token = None;
     }
 
     fn activate_acquired_session(&self, acquired: &AcquireLeadershipResult) -> Result<(), HaError> {
@@ -517,9 +565,10 @@ impl LeaderCoordinator {
 
     fn ensure_active_session(&self, session: &LeadershipSession) -> Result<(), HaError> {
         match self
-            .active_owner_token
+            .session_state
             .lock()
             .expect("active owner token mutex poisoned")
+            .active_owner_token
             .as_ref()
         {
             Some(token) if token == &session.owner_token => Ok(()),
@@ -527,17 +576,19 @@ impl LeaderCoordinator {
         }
     }
 
-    fn ensure_release_session_matches(&self, session: &LeadershipSession) -> Result<(), HaError> {
-        match self
-            .active_owner_token
+    fn begin_explicit_release(&self, session: &LeadershipSession) -> Result<(), HaError> {
+        let mut state = self
+            .session_state
             .lock()
-            .expect("active owner token mutex poisoned")
-            .as_ref()
-        {
+            .expect("leadership session state mutex poisoned");
+        match state.active_owner_token.as_ref() {
             Some(token) if token != &session.owner_token => Err(HaError::InvalidParams(
                 "leadership session owner token mismatch".into(),
             )),
-            _ => Ok(()),
+            _ => {
+                state.loss_suppressed_owner_token = Some(session.owner_token.clone());
+                Ok(())
+            }
         }
     }
 }
