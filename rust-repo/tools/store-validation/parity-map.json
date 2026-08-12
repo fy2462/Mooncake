@@ -10462,13 +10462,18 @@
     "file": "ha/oplog/ha_recovery_test.cpp",
     "test": "HaRecoveryTest.PromotionWithPendingGaps"
    },
-   "reason": "Rust test_pending_gap_applies_when_missing_entries_arrive proves only in-process buffering; production try_resolve_gaps_once has no discoverable elected-etcd promotion test that fetches late 8 from the shared oplog under election fencing.",
+   "reason": "Rust applies exact sequences 1 through 7, buffers 9 and 10, registers missing 8, then drives the production promotion gap-resolution primitive against a recording shared-store fixture containing only the late sequence 8. It proves the exact read (8,1), fetched count one, automatic pending drain to expected 11, and the exact ten-key result.",
    "review": {
-    "oracle": "ha_recovery_test.cpp PromotionWithPendingGaps and OpLogApplier::ProcessPendingEntries/TryResolveGapsOnceForPromotion; Rust ha/oplog_applier.rs test_pending_gap_applies_when_missing_entries_arrive",
+    "oracle": "ha_recovery_test.cpp PromotionWithPendingGaps and OpLogApplier::ProcessPendingEntries/TryResolveGapsOnceForPromotion; Rust ha/oplog_applier.rs cpp_parity_ha_oplog_ha_recovery_test_cpp_harecoverytest_promotionwithpendinggaps",
     "reviewed": true
    },
-   "rust": [],
-   "status": "missing"
+   "rust": [
+    {
+     "file": "mooncake-store-master/src/ha/oplog_applier.rs",
+     "test": "cpp_parity_ha_oplog_ha_recovery_test_cpp_harecoverytest_promotionwithpendinggaps"
+    }
+   ],
+   "status": "covered"
   },
   {
    "behavior": "When sequence 8 is absent or GC'd and 9 through 10 are pending, promotion observes an empty gap-resolution fetch, timeout-skips 8, drains pending entries, and does not hang.",

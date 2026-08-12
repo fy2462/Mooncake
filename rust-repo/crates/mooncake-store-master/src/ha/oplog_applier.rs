@@ -3083,6 +3083,48 @@ mod tests {
     }
 
     #[test]
+    fn cpp_parity_ha_oplog_ha_recovery_test_cpp_harecoverytest_promotionwithpendinggaps() {
+        use crate::oplog::test_support::TEST_CPP_OP_PUT_END;
+
+        let state = make_state();
+        let applier = OpLogApplier::new(state.clone());
+        let initial = (1_u64..=7)
+            .map(|sequence| {
+                cpp_wire_record_for_key(sequence, TEST_CPP_OP_PUT_END, &format!("key_{sequence}"))
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(applier.apply_op_log_entries(&initial), 7);
+        assert_eq!(
+            applier.apply_op_log_entries(&[
+                cpp_wire_record_for_key(9, TEST_CPP_OP_PUT_END, "key_9"),
+                cpp_wire_record_for_key(10, TEST_CPP_OP_PUT_END, "key_10"),
+            ]),
+            0
+        );
+        assert_eq!(applier.get_expected_sequence_id(), 8);
+        assert_eq!(state.objects.len(), 7);
+        assert_eq!(applier.process_pending_entries_at(Instant::now()), 0);
+        assert!(applier.missing_sequence_first_seen.lock().contains_key(&8));
+        let store = GapResolutionStore::new(
+            8,
+            GapReadResult::Entries(vec![cpp_wire_record_for_key(
+                8,
+                TEST_CPP_OP_PUT_END,
+                "key_8",
+            )]),
+        );
+
+        assert_eq!(applier.try_resolve_gaps_once(&store, 1_024), (1, 1));
+
+        assert_eq!(*store.reads.lock(), vec![(8, 1)]);
+        assert_eq!(applier.get_expected_sequence_id(), 11);
+        assert_eq!(state.objects.len(), 10);
+        for index in 1..=10 {
+            assert!(state.objects.contains_key(&format!("default\0key_{index}")));
+        }
+    }
+
+    #[test]
     fn cpp_parity_ha_oplog_oplog_applier_test_cpp_oplogappliertest_testapplyoplogentries_batch() {
         use crate::oplog::test_support::TEST_CPP_OP_PUT_END;
 
