@@ -32146,13 +32146,13 @@
     "file": "master_service_tenant_quota_test.cpp",
     "test": "MasterServiceTenantQuotaTest.CapacityIsSampledInsideQuotaRecomputeCoordination"
    },
-   "reason": "Production prerequisite: expose a deterministic checkpoint on the production recompute/capacity-sampling path and a test-only mount helper that does not independently recompute; no Rust test currently proves the sampling order. Add cpp_parity_recompute_samples_capacity_after_coordination to mooncake-store-master/src/service/mod.rs; use dynamic quota capacity with tenant-a=1,000, mount 100 bytes without recompute, pause one recompute before its coordinated sample, mount another 50 bytes, release and await recompute, then assert effective_quota_bytes exactly 150. The test must prove the observable ordering and final value without requiring Rust to copy the C++ mutex architecture.",
+   "reason": "The Rust parity test pauses the production recompute path before its coordinated capacity sample, mounts a second 50-byte segment after the initial 100-byte segment, then releases the recompute and asserts tenant-a effective_quota_bytes is exactly 150. The deterministic barrier proves the later segment is included in the sample without requiring the C++ mutex architecture to be copied.",
    "review": {
     "oracle": "mooncake-store/tests/master_service_tenant_quota_test.cpp:836-864, C++ recompute coordination, and Rust tenant_quota_capacity_bytes/recompute path",
     "reviewed": true
    },
-   "rust": [],
-   "status": "missing"
+   "rust": [{"file": "mooncake-store-master/src/service/mod.rs", "test": "cpp_parity_recompute_samples_capacity_after_coordination"}],
+   "status": "covered"
   },
   {
    "behavior": "After connector policy reload removes tenant-b, its completed 100-byte memory object remains readable as an orphan with explicit policy false, requested/effective quota 0, and over_quota true; a new write fails TENANT_NOT_REGISTERED and forced removal of the orphan succeeds.",

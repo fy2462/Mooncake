@@ -95,6 +95,52 @@ pub(crate) struct ForegroundRequestGuard {
 }
 
 #[cfg(test)]
+pub(crate) struct QuotaRecomputeTestBarrier {
+    started: std::sync::Mutex<bool>,
+    cv: std::sync::Condvar,
+    released: std::sync::Mutex<bool>,
+    released_cv: std::sync::Condvar,
+}
+
+#[cfg(test)]
+impl QuotaRecomputeTestBarrier {
+    pub(crate) fn new() -> Self {
+        Self {
+            started: std::sync::Mutex::new(false),
+            cv: std::sync::Condvar::new(),
+            released: std::sync::Mutex::new(false),
+            released_cv: std::sync::Condvar::new(),
+        }
+    }
+    pub(crate) fn wait_started(&self) {
+        let mut started = self.started.lock().unwrap();
+        while !*started {
+            let (next, result) = self
+                .cv
+                .wait_timeout(started, std::time::Duration::from_secs(5))
+                .unwrap();
+            started = next;
+            assert!(
+                !result.timed_out(),
+                "quota recompute barrier was not reached"
+            );
+        }
+    }
+    pub(crate) fn pause(&self) {
+        *self.started.lock().unwrap() = true;
+        self.cv.notify_all();
+        let mut released = self.released.lock().unwrap();
+        while !*released {
+            released = self.released_cv.wait(released).unwrap();
+        }
+    }
+    pub(crate) fn release(&self) {
+        *self.released.lock().unwrap() = true;
+        self.released_cv.notify_all();
+    }
+}
+
+#[cfg(test)]
 pub(crate) struct NofAllocationTestBarrier {
     started: std::sync::Mutex<bool>,
     started_cv: std::sync::Condvar,
@@ -387,6 +433,9 @@ pub(crate) struct MasterState {
     /// Serializes policy persistence so connector writes commit in the same
     /// order as their corresponding in-memory policy mutations.
     pub(crate) tenant_quota_policy_mutations: Mutex<()>,
+    pub(crate) tenant_quota_recompute_mutex: Mutex<()>,
+    #[cfg(test)]
+    pub(crate) quota_recompute_test_barrier: Mutex<Option<Arc<QuotaRecomputeTestBarrier>>>,
     /// Tracks in-flight remote source pulls so only one node fetches a given key.
     /// 远端回源协调表：确保同一 key 只有一个节点从远端（如 S3）拉取数据。
     pub(crate) pending_remote_pulls: DashMap<String, RemotePullEntry>,
@@ -749,6 +798,9 @@ impl MasterState {
             service_fenced: AtomicBool::new(false),
             tenant_quotas: RwLock::new(TenantQuotaTable::new(0)),
             tenant_quota_policy_mutations: Mutex::new(()),
+            tenant_quota_recompute_mutex: Mutex::new(()),
+            #[cfg(test)]
+            quota_recompute_test_barrier: Mutex::new(None),
             pending_remote_pulls: DashMap::new(),
             nof_heartbeat_states: DashMap::new(),
             kv_event_publisher: Arc::new(KvEventPublisher::new(Default::default())),

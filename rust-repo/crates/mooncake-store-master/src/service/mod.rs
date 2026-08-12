@@ -1543,6 +1543,35 @@ impl MasterServiceImpl {
         }
     }
 
+    fn recompute_tenant_effective_quotas(&self) -> u64 {
+        let _guard = self.state.tenant_quota_recompute_mutex.lock();
+        #[cfg(test)]
+        if let Some(barrier) = self
+            .state
+            .quota_recompute_test_barrier
+            .lock()
+            .as_ref()
+            .cloned()
+        {
+            barrier.pause();
+        }
+        let capacity = self.tenant_quota_capacity_bytes();
+        self.state
+            .tenant_quotas
+            .write()
+            .recompute_effective_quotas(capacity);
+        capacity
+    }
+
+    #[cfg(test)]
+    pub(crate) fn install_quota_recompute_barrier(
+        &self,
+    ) -> std::sync::Arc<state::QuotaRecomputeTestBarrier> {
+        let barrier = std::sync::Arc::new(state::QuotaRecomputeTestBarrier::new());
+        *self.state.quota_recompute_test_barrier.lock() = Some(barrier.clone());
+        barrier
+    }
+
     fn tenant_quota_status(error: TenantQuotaError) -> Status {
         match error {
             TenantQuotaError::QuotaExceeded => Status::resource_exhausted("tenant quota exceeded"),
@@ -1583,9 +1612,8 @@ impl MasterServiceImpl {
         if !self.state.runtime_config.enable_tenant_quota {
             return Ok(());
         }
-        let capacity = self.tenant_quota_capacity_bytes();
+        self.recompute_tenant_effective_quotas();
         let mut quotas = self.state.tenant_quotas.write();
-        quotas.recompute_effective_quotas(capacity);
         quotas
             .reserve(tenant_id, bytes)
             .map_err(Self::tenant_quota_status)
@@ -1597,10 +1625,9 @@ impl MasterServiceImpl {
         incoming_bytes: u64,
         protected_key: Option<&str>,
     ) -> Result<(), Status> {
-        let capacity = self.tenant_quota_capacity_bytes();
+        self.recompute_tenant_effective_quotas();
         let deficit = {
-            let mut quotas = self.state.tenant_quotas.write();
-            quotas.recompute_effective_quotas(capacity);
+            let quotas = self.state.tenant_quotas.write();
             quotas.compute_deficit(tenant_id, incoming_bytes)
         };
         run_tenant_quota_eviction(&self.state, tenant_id, protected_key, deficit).map_err(
@@ -1841,7 +1868,7 @@ impl MasterServiceImpl {
             ));
         };
         let _policy_mutation_guard = self.state.tenant_quota_policy_mutations.lock();
-        let capacity = self.tenant_quota_capacity_bytes();
+        let capacity = self.recompute_tenant_effective_quotas();
         let mut next = self.state.tenant_quotas.read().clone();
         next.upsert_policy(tenant_id, requested_quota_bytes, capacity)
             .map_err(Self::tenant_quota_status)?;
@@ -1885,7 +1912,7 @@ impl MasterServiceImpl {
             ));
         };
         let _policy_mutation_guard = self.state.tenant_quota_policy_mutations.lock();
-        let capacity = self.tenant_quota_capacity_bytes();
+        let capacity = self.recompute_tenant_effective_quotas();
         // C++ deletion semantics: the tenant's explicit policy is removed from
         // the live admission table BEFORE the connector save completes, so
         // concurrent reservations observe TENANT_NOT_REGISTERED while
@@ -2212,6 +2239,9 @@ impl MasterServiceImpl {
             // 租户配额表：per-tenant 存储配额分配与追踪
             tenant_quotas: RwLock::new(tenant_quotas),
             tenant_quota_policy_mutations: parking_lot::Mutex::new(()),
+            tenant_quota_recompute_mutex: parking_lot::Mutex::new(()),
+            #[cfg(test)]
+            quota_recompute_test_barrier: parking_lot::Mutex::new(None),
 
             // ── 远端回源 / remote pull ──
             // key → PendingRemotePullEntry：缓存未命中时从 S3 等远端回拉数据的追踪状态
@@ -10418,6 +10448,66 @@ mod tenant_quota_parity_tests {
         assert_eq!(snapshot.used_bytes, 0);
         assert_eq!(snapshot.reserved_bytes, 0);
         assert_eq!(snapshot.metadata_object_count, 1);
+    }
+
+    #[test]
+    fn cpp_parity_recompute_samples_capacity_after_coordination() {
+        let service = std::sync::Arc::new(MasterServiceImpl::with_runtime_config(
+            MasterRuntimeConfig {
+                enable_tenant_quota: true,
+                tenant_quota_pool_capacity_bytes: 0,
+                tenant_quota_connector_uri: "/tmp/mooncake-tq-capacity.yaml".into(),
+                ..Default::default()
+            },
+        ));
+        service
+            .upsert_tenant_quota_policy("tenant-a", 1_000)
+            .unwrap();
+        let client = Uuid::new_v4();
+        let first = Uuid::new_v4();
+        let second = Uuid::new_v4();
+        service.state.allocator.write().add_segment(
+            mooncake_store_core::Segment {
+                id: first,
+                name: "capacity-a".into(),
+                base: 0x1000,
+                size: 100,
+                te_endpoint: String::new(),
+                protocol: String::new(),
+                host_id: String::new(),
+            },
+            0,
+            client,
+        );
+        let barrier = service.install_quota_recompute_barrier();
+        let worker_service = std::sync::Arc::clone(&service);
+        let worker = std::thread::spawn(move || {
+            worker_service.recompute_tenant_effective_quotas();
+        });
+        barrier.wait_started();
+        service.state.allocator.write().add_segment(
+            mooncake_store_core::Segment {
+                id: second,
+                name: "capacity-b".into(),
+                base: 0x2000,
+                size: 50,
+                te_endpoint: String::new(),
+                protocol: String::new(),
+                host_id: String::new(),
+            },
+            0,
+            client,
+        );
+        barrier.release();
+        worker.join().unwrap();
+        assert_eq!(
+            service
+                .get_tenant_quota_snapshot("tenant-a")
+                .unwrap()
+                .unwrap()
+                .effective_quota_bytes,
+            150
+        );
     }
 
     #[test]

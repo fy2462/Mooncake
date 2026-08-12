@@ -2671,6 +2671,9 @@ mod tests {
             service_fenced: AtomicBool::new(false),
             tenant_quotas: RwLock::new(crate::tenant_quota::TenantQuotaTable::new(0)),
             tenant_quota_policy_mutations: parking_lot::Mutex::new(()),
+            tenant_quota_recompute_mutex: parking_lot::Mutex::new(()),
+            #[cfg(test)]
+            quota_recompute_test_barrier: parking_lot::Mutex::new(None),
             pending_remote_pulls: DashMap::new(),
             nof_heartbeat_states: DashMap::new(),
             kv_event_publisher: Arc::new(
