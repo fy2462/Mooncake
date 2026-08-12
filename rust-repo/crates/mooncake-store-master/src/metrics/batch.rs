@@ -2,6 +2,56 @@ use lazy_static::lazy_static;
 use prometheus::IntCounter;
 
 lazy_static! {
+    pub static ref BATCH_GET_REPLICA_LIST_REQUESTS: IntCounter = IntCounter::new(
+        "mooncake_store_batch_get_replica_list_total",
+        "total batch get_replica_list requests"
+    )
+    .unwrap();
+    pub static ref BATCH_GET_REPLICA_LIST_FAILURES: IntCounter = IntCounter::new(
+        "mooncake_store_batch_get_replica_list_failures_total",
+        "total failed batch get_replica_list requests"
+    )
+    .unwrap();
+    pub static ref BATCH_GET_REPLICA_LIST_PARTIAL_SUCCESSES: IntCounter = IntCounter::new(
+        "mooncake_store_batch_get_replica_list_partial_successes_total",
+        "total partially successful batch get_replica_list requests"
+    )
+    .unwrap();
+    pub static ref BATCH_GET_REPLICA_LIST_ITEMS: IntCounter = IntCounter::new(
+        "mooncake_store_batch_get_replica_list_items_total",
+        "total items processed by batch get_replica_list requests"
+    )
+    .unwrap();
+    pub static ref BATCH_GET_REPLICA_LIST_FAILED_ITEMS: IntCounter = IntCounter::new(
+        "mooncake_store_batch_get_replica_list_failed_items_total",
+        "total failed items in batch get_replica_list requests"
+    )
+    .unwrap();
+    pub static ref BATCH_PUT_START_REQUESTS: IntCounter = IntCounter::new(
+        "mooncake_store_batch_put_start_total",
+        "total batch put_start requests"
+    )
+    .unwrap();
+    pub static ref BATCH_PUT_START_FAILURES: IntCounter = IntCounter::new(
+        "mooncake_store_batch_put_start_failures_total",
+        "total failed batch put_start requests"
+    )
+    .unwrap();
+    pub static ref BATCH_PUT_START_PARTIAL_SUCCESSES: IntCounter = IntCounter::new(
+        "mooncake_store_batch_put_start_partial_successes_total",
+        "total partially successful batch put_start requests"
+    )
+    .unwrap();
+    pub static ref BATCH_PUT_START_ITEMS: IntCounter = IntCounter::new(
+        "mooncake_store_batch_put_start_items_total",
+        "total items processed by batch put_start requests"
+    )
+    .unwrap();
+    pub static ref BATCH_PUT_START_FAILED_ITEMS: IntCounter = IntCounter::new(
+        "mooncake_store_batch_put_start_failed_items_total",
+        "total failed items in batch put_start requests"
+    )
+    .unwrap();
     pub static ref BATCH_EXIST_KEY_REQUESTS: IntCounter = IntCounter::new(
         "mooncake_store_batch_exist_key_total",
         "total batch exist_key requests (items)"
@@ -57,6 +107,21 @@ lazy_static! {
         "total failed items in batch put_end requests"
     )
     .unwrap();
+    pub static ref BATCH_PUT_END_PARTIAL_SUCCESSES: IntCounter = IntCounter::new(
+        "mooncake_store_batch_put_end_partial_successes_total",
+        "total partially successful batch put_end requests"
+    )
+    .unwrap();
+    pub static ref BATCH_PUT_END_ITEMS: IntCounter = IntCounter::new(
+        "mooncake_store_batch_put_end_items_total",
+        "total items processed by batch put_end requests"
+    )
+    .unwrap();
+    pub static ref BATCH_PUT_END_FAILED_ITEMS: IntCounter = IntCounter::new(
+        "mooncake_store_batch_put_end_failed_items_total",
+        "total failed items in batch put_end requests"
+    )
+    .unwrap();
     pub static ref BATCH_PUT_REVOKE_REQUESTS: IntCounter = IntCounter::new(
         "mooncake_store_batch_put_revoke_total",
         "total batch put_revoke requests (items)"
@@ -64,6 +129,21 @@ lazy_static! {
     .unwrap();
     pub static ref BATCH_PUT_REVOKE_FAILURES: IntCounter = IntCounter::new(
         "mooncake_store_batch_put_revoke_failures_total",
+        "total failed items in batch put_revoke requests"
+    )
+    .unwrap();
+    pub static ref BATCH_PUT_REVOKE_PARTIAL_SUCCESSES: IntCounter = IntCounter::new(
+        "mooncake_store_batch_put_revoke_partial_successes_total",
+        "total partially successful batch put_revoke requests"
+    )
+    .unwrap();
+    pub static ref BATCH_PUT_REVOKE_ITEMS: IntCounter = IntCounter::new(
+        "mooncake_store_batch_put_revoke_items_total",
+        "total items processed by batch put_revoke requests"
+    )
+    .unwrap();
+    pub static ref BATCH_PUT_REVOKE_FAILED_ITEMS: IntCounter = IntCounter::new(
+        "mooncake_store_batch_put_revoke_failed_items_total",
         "total failed items in batch put_revoke requests"
     )
     .unwrap();

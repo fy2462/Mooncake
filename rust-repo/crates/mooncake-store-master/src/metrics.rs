@@ -42,24 +42,33 @@ mod operations;
 
 pub use batch::{
     BATCH_EXIST_KEY_FAILED_ITEMS, BATCH_EXIST_KEY_FAILURES, BATCH_EXIST_KEY_ITEMS,
-    BATCH_EXIST_KEY_PARTIAL_SUCCESSES, BATCH_EXIST_KEY_REQUESTS, BATCH_PUT_END_FAILURES,
-    BATCH_PUT_END_REQUESTS, BATCH_PUT_REVOKE_FAILURES, BATCH_PUT_REVOKE_REQUESTS,
-    BATCH_QUERY_IP_FAILURES, BATCH_QUERY_IP_REQUESTS, BATCH_REMOVE_FAILURES, BATCH_REMOVE_REQUESTS,
-    BATCH_REPLICA_CLEAR_FAILURES, BATCH_REPLICA_CLEAR_REQUESTS, BATCH_UPSERT_END_FAILURES,
-    BATCH_UPSERT_END_REQUESTS,
+    BATCH_EXIST_KEY_PARTIAL_SUCCESSES, BATCH_EXIST_KEY_REQUESTS,
+    BATCH_GET_REPLICA_LIST_FAILED_ITEMS, BATCH_GET_REPLICA_LIST_FAILURES,
+    BATCH_GET_REPLICA_LIST_ITEMS, BATCH_GET_REPLICA_LIST_PARTIAL_SUCCESSES,
+    BATCH_GET_REPLICA_LIST_REQUESTS, BATCH_PUT_END_FAILED_ITEMS, BATCH_PUT_END_FAILURES,
+    BATCH_PUT_END_ITEMS, BATCH_PUT_END_PARTIAL_SUCCESSES, BATCH_PUT_END_REQUESTS,
+    BATCH_PUT_REVOKE_FAILED_ITEMS, BATCH_PUT_REVOKE_FAILURES, BATCH_PUT_REVOKE_ITEMS,
+    BATCH_PUT_REVOKE_PARTIAL_SUCCESSES, BATCH_PUT_REVOKE_REQUESTS, BATCH_PUT_START_FAILED_ITEMS,
+    BATCH_PUT_START_FAILURES, BATCH_PUT_START_ITEMS, BATCH_PUT_START_PARTIAL_SUCCESSES,
+    BATCH_PUT_START_REQUESTS, BATCH_QUERY_IP_FAILURES, BATCH_QUERY_IP_REQUESTS,
+    BATCH_REMOVE_FAILURES, BATCH_REMOVE_REQUESTS, BATCH_REPLICA_CLEAR_FAILURES,
+    BATCH_REPLICA_CLEAR_REQUESTS, BATCH_UPSERT_END_FAILURES, BATCH_UPSERT_END_REQUESTS,
 };
 pub use cache::{
     FILE_CACHE_HIT_BYTES, FILE_CACHE_HITS, FILE_CACHE_TOTAL, MEM_CACHE_HIT_BYTES, MEM_CACHE_HITS,
     MEM_CACHE_TOTAL, TOTAL_GETS, VALID_GETS,
 };
 pub use operations::{
-    ERROR_COUNTER, EXIST_KEY_FAILURES, EXIST_KEY_REQUESTS, GET_BY_REGEX_FAILURES,
-    GET_BY_REGEX_REQUESTS, GET_FAILURES, GET_REQUESTS, MOUNT_SEGMENT_FAILURES,
-    MOUNT_SEGMENT_REQUESTS, PING_FAILURES, PING_REQUESTS, PUT_END_FAILURES, PUT_END_REQUESTS,
-    PUT_REVOKE_FAILURES, PUT_REVOKE_REQUESTS, PUT_START_ALLOCATION_FAILURES, PUT_START_FAILURES,
-    PUT_START_REQUESTS, REMOVE_ALL_FAILURES, REMOVE_ALL_REQUESTS, REMOVE_BY_REGEX_FAILURES,
-    REMOVE_BY_REGEX_REQUESTS, REMOVE_FAILURES, REMOVE_REQUESTS, UNMOUNT_SEGMENT_FAILURES,
-    UNMOUNT_SEGMENT_REQUESTS, UPSERT_FAILURES, UPSERT_REQUESTS,
+    COPY_END_FAILURES, COPY_END_REQUESTS, COPY_REVOKE_FAILURES, COPY_REVOKE_REQUESTS,
+    COPY_START_FAILURES, COPY_START_REQUESTS, ERROR_COUNTER, EXIST_KEY_FAILURES,
+    EXIST_KEY_REQUESTS, GET_BY_REGEX_FAILURES, GET_BY_REGEX_REQUESTS, GET_FAILURES, GET_REQUESTS,
+    MOUNT_SEGMENT_FAILURES, MOUNT_SEGMENT_REQUESTS, MOVE_END_FAILURES, MOVE_END_REQUESTS,
+    MOVE_REVOKE_FAILURES, MOVE_REVOKE_REQUESTS, MOVE_START_FAILURES, MOVE_START_REQUESTS,
+    PING_FAILURES, PING_REQUESTS, PUT_END_FAILURES, PUT_END_REQUESTS, PUT_REVOKE_FAILURES,
+    PUT_REVOKE_REQUESTS, PUT_START_ALLOCATION_FAILURES, PUT_START_FAILURES, PUT_START_REQUESTS,
+    REMOVE_ALL_FAILURES, REMOVE_ALL_REQUESTS, REMOVE_BY_REGEX_FAILURES, REMOVE_BY_REGEX_REQUESTS,
+    REMOVE_FAILURES, REMOVE_REQUESTS, UNMOUNT_SEGMENT_FAILURES, UNMOUNT_SEGMENT_REQUESTS,
+    UPSERT_FAILURES, UPSERT_REQUESTS,
 };
 
 /// Stable C++-compatible cache-stat indices. New values must be appended.
@@ -163,6 +172,196 @@ lazy_static! {
         "total file capacity bytes"
     )
     .unwrap();
+    pub static ref EVICTION_ATTEMPTS: IntCounter = IntCounter::new(
+        "mooncake_store_eviction_attempts_total",
+        "total eviction attempts"
+    )
+    .unwrap();
+    pub static ref EVICTION_SUCCESS: IntCounter = IntCounter::new(
+        "mooncake_store_eviction_success_total",
+        "total successful evictions"
+    )
+    .unwrap();
+    pub static ref EVICTED_KEYS: IntCounter =
+        IntCounter::new("mooncake_store_evicted_keys_total", "total keys evicted").unwrap();
+    pub static ref EVICTED_BYTES: IntCounter =
+        IntCounter::new("mooncake_store_evicted_bytes_total", "total bytes evicted").unwrap();
+    pub static ref PUT_START_DISCARD_COUNT: IntCounter = IntCounter::new(
+        "mooncake_store_put_start_discard_total",
+        "total PutStart replicas discarded after the discard timeout"
+    )
+    .unwrap();
+    pub static ref PUT_START_RELEASE_COUNT: IntCounter = IntCounter::new(
+        "mooncake_store_put_start_release_total",
+        "total PutStart replicas released after the release timeout"
+    )
+    .unwrap();
+    pub static ref PUT_START_DISCARDED_STAGING_BYTES: IntGauge = IntGauge::new(
+        "mooncake_store_put_start_discarded_staging_bytes",
+        "current bytes retained by discarded PutStart staging replicas"
+    )
+    .unwrap();
+}
+
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct MasterMetricSnapshot {
+    pub allocated_mem_size: i64,
+    pub total_mem_capacity: i64,
+    pub global_mem_used_ratio: f64,
+    pub allocated_file_size: i64,
+    pub total_file_capacity: i64,
+    pub global_file_used_ratio: f64,
+    pub key_count: i64,
+    pub put_start_requests: u64,
+    pub put_start_failures: u64,
+    pub put_start_allocation_failures: u64,
+    pub put_end_requests: u64,
+    pub put_end_failures: u64,
+    pub put_revoke_requests: u64,
+    pub put_revoke_failures: u64,
+    pub get_replica_list_requests: u64,
+    pub get_replica_list_failures: u64,
+    pub exist_key_requests: u64,
+    pub exist_key_failures: u64,
+    pub remove_requests: u64,
+    pub remove_failures: u64,
+    pub remove_all_requests: u64,
+    pub remove_all_failures: u64,
+    pub mount_segment_requests: u64,
+    pub mount_segment_failures: u64,
+    pub unmount_segment_requests: u64,
+    pub unmount_segment_failures: u64,
+    pub copy_start_requests: u64,
+    pub copy_start_failures: u64,
+    pub copy_end_requests: u64,
+    pub copy_end_failures: u64,
+    pub copy_revoke_requests: u64,
+    pub copy_revoke_failures: u64,
+    pub move_start_requests: u64,
+    pub move_start_failures: u64,
+    pub move_end_requests: u64,
+    pub move_end_failures: u64,
+    pub move_revoke_requests: u64,
+    pub move_revoke_failures: u64,
+    pub eviction_success: u64,
+    pub eviction_attempts: u64,
+    pub evicted_key_count: u64,
+    pub evicted_size: u64,
+    pub batch_exist_key_requests: u64,
+    pub batch_exist_key_failures: u64,
+    pub batch_exist_key_partial_successes: u64,
+    pub batch_exist_key_items: u64,
+    pub batch_exist_key_failed_items: u64,
+    pub batch_get_replica_list_requests: u64,
+    pub batch_get_replica_list_failures: u64,
+    pub batch_get_replica_list_partial_successes: u64,
+    pub batch_get_replica_list_items: u64,
+    pub batch_get_replica_list_failed_items: u64,
+    pub batch_put_start_requests: u64,
+    pub batch_put_start_failures: u64,
+    pub batch_put_start_partial_successes: u64,
+    pub batch_put_start_items: u64,
+    pub batch_put_start_failed_items: u64,
+    pub batch_put_end_requests: u64,
+    pub batch_put_end_failures: u64,
+    pub batch_put_end_partial_successes: u64,
+    pub batch_put_end_items: u64,
+    pub batch_put_end_failed_items: u64,
+    pub batch_put_revoke_requests: u64,
+    pub batch_put_revoke_failures: u64,
+    pub batch_put_revoke_partial_successes: u64,
+    pub batch_put_revoke_items: u64,
+    pub batch_put_revoke_failed_items: u64,
+    pub put_start_discard_count: u64,
+    pub put_start_release_count: u64,
+    pub put_start_discarded_staging_size: i64,
+}
+
+fn zero_safe_ratio(allocated: i64, capacity: i64) -> f64 {
+    if capacity > 0 {
+        allocated as f64 / capacity as f64
+    } else {
+        0.0
+    }
+}
+
+pub fn master_metric_snapshot() -> MasterMetricSnapshot {
+    let allocated_mem_size = ALLOCATED_MEM_SIZE.get();
+    let total_mem_capacity = TOTAL_MEM_CAPACITY.get();
+    let allocated_file_size = ALLOCATED_FILE_SIZE.get();
+    let total_file_capacity = TOTAL_FILE_CAPACITY.get();
+    MasterMetricSnapshot {
+        allocated_mem_size,
+        total_mem_capacity,
+        global_mem_used_ratio: zero_safe_ratio(allocated_mem_size, total_mem_capacity),
+        allocated_file_size,
+        total_file_capacity,
+        global_file_used_ratio: zero_safe_ratio(allocated_file_size, total_file_capacity),
+        key_count: KEY_COUNT.get(),
+        put_start_requests: PUT_START_REQUESTS.get(),
+        put_start_failures: PUT_START_FAILURES.get(),
+        put_start_allocation_failures: PUT_START_ALLOCATION_FAILURES.get(),
+        put_end_requests: PUT_END_REQUESTS.get(),
+        put_end_failures: PUT_END_FAILURES.get(),
+        put_revoke_requests: PUT_REVOKE_REQUESTS.get(),
+        put_revoke_failures: PUT_REVOKE_FAILURES.get(),
+        get_replica_list_requests: GET_REQUESTS.get(),
+        get_replica_list_failures: GET_FAILURES.get(),
+        exist_key_requests: EXIST_KEY_REQUESTS.get(),
+        exist_key_failures: EXIST_KEY_FAILURES.get(),
+        remove_requests: REMOVE_REQUESTS.get(),
+        remove_failures: REMOVE_FAILURES.get(),
+        remove_all_requests: REMOVE_ALL_REQUESTS.get(),
+        remove_all_failures: REMOVE_ALL_FAILURES.get(),
+        mount_segment_requests: MOUNT_SEGMENT_REQUESTS.get(),
+        mount_segment_failures: MOUNT_SEGMENT_FAILURES.get(),
+        unmount_segment_requests: UNMOUNT_SEGMENT_REQUESTS.get(),
+        unmount_segment_failures: UNMOUNT_SEGMENT_FAILURES.get(),
+        copy_start_requests: COPY_START_REQUESTS.get(),
+        copy_start_failures: COPY_START_FAILURES.get(),
+        copy_end_requests: COPY_END_REQUESTS.get(),
+        copy_end_failures: COPY_END_FAILURES.get(),
+        copy_revoke_requests: COPY_REVOKE_REQUESTS.get(),
+        copy_revoke_failures: COPY_REVOKE_FAILURES.get(),
+        move_start_requests: MOVE_START_REQUESTS.get(),
+        move_start_failures: MOVE_START_FAILURES.get(),
+        move_end_requests: MOVE_END_REQUESTS.get(),
+        move_end_failures: MOVE_END_FAILURES.get(),
+        move_revoke_requests: MOVE_REVOKE_REQUESTS.get(),
+        move_revoke_failures: MOVE_REVOKE_FAILURES.get(),
+        eviction_success: EVICTION_SUCCESS.get(),
+        eviction_attempts: EVICTION_ATTEMPTS.get(),
+        evicted_key_count: EVICTED_KEYS.get(),
+        evicted_size: EVICTED_BYTES.get(),
+        batch_exist_key_requests: BATCH_EXIST_KEY_REQUESTS.get(),
+        batch_exist_key_failures: BATCH_EXIST_KEY_FAILURES.get(),
+        batch_exist_key_partial_successes: BATCH_EXIST_KEY_PARTIAL_SUCCESSES.get(),
+        batch_exist_key_items: BATCH_EXIST_KEY_ITEMS.get(),
+        batch_exist_key_failed_items: BATCH_EXIST_KEY_FAILED_ITEMS.get(),
+        batch_get_replica_list_requests: BATCH_GET_REPLICA_LIST_REQUESTS.get(),
+        batch_get_replica_list_failures: BATCH_GET_REPLICA_LIST_FAILURES.get(),
+        batch_get_replica_list_partial_successes: BATCH_GET_REPLICA_LIST_PARTIAL_SUCCESSES.get(),
+        batch_get_replica_list_items: BATCH_GET_REPLICA_LIST_ITEMS.get(),
+        batch_get_replica_list_failed_items: BATCH_GET_REPLICA_LIST_FAILED_ITEMS.get(),
+        batch_put_start_requests: BATCH_PUT_START_REQUESTS.get(),
+        batch_put_start_failures: BATCH_PUT_START_FAILURES.get(),
+        batch_put_start_partial_successes: BATCH_PUT_START_PARTIAL_SUCCESSES.get(),
+        batch_put_start_items: BATCH_PUT_START_ITEMS.get(),
+        batch_put_start_failed_items: BATCH_PUT_START_FAILED_ITEMS.get(),
+        batch_put_end_requests: BATCH_PUT_END_REQUESTS.get(),
+        batch_put_end_failures: BATCH_PUT_END_FAILURES.get(),
+        batch_put_end_partial_successes: BATCH_PUT_END_PARTIAL_SUCCESSES.get(),
+        batch_put_end_items: BATCH_PUT_END_ITEMS.get(),
+        batch_put_end_failed_items: BATCH_PUT_END_FAILED_ITEMS.get(),
+        batch_put_revoke_requests: BATCH_PUT_REVOKE_REQUESTS.get(),
+        batch_put_revoke_failures: BATCH_PUT_REVOKE_FAILURES.get(),
+        batch_put_revoke_partial_successes: BATCH_PUT_REVOKE_PARTIAL_SUCCESSES.get(),
+        batch_put_revoke_items: BATCH_PUT_REVOKE_ITEMS.get(),
+        batch_put_revoke_failed_items: BATCH_PUT_REVOKE_FAILED_ITEMS.get(),
+        put_start_discard_count: PUT_START_DISCARD_COUNT.get(),
+        put_start_release_count: PUT_START_RELEASE_COUNT.get(),
+        put_start_discarded_staging_size: PUT_START_DISCARDED_STAGING_BYTES.get(),
+    }
 }
 
 // Promotion retry lifecycle counters. Names intentionally match the C++ master.
@@ -580,6 +779,18 @@ pub fn register_metrics() {
     register_counter(&MOUNT_SEGMENT_FAILURES);
     register_counter(&UNMOUNT_SEGMENT_REQUESTS);
     register_counter(&UNMOUNT_SEGMENT_FAILURES);
+    register_counter(&COPY_START_REQUESTS);
+    register_counter(&COPY_START_FAILURES);
+    register_counter(&COPY_END_REQUESTS);
+    register_counter(&COPY_END_FAILURES);
+    register_counter(&COPY_REVOKE_REQUESTS);
+    register_counter(&COPY_REVOKE_FAILURES);
+    register_counter(&MOVE_START_REQUESTS);
+    register_counter(&MOVE_START_FAILURES);
+    register_counter(&MOVE_END_REQUESTS);
+    register_counter(&MOVE_END_FAILURES);
+    register_counter(&MOVE_REVOKE_REQUESTS);
+    register_counter(&MOVE_REVOKE_FAILURES);
     register_counter(&UPSERT_REQUESTS);
     register_counter(&UPSERT_FAILURES);
     register_counter(&ERROR_COUNTER);
@@ -590,14 +801,30 @@ pub fn register_metrics() {
     register_counter(&BATCH_EXIST_KEY_ITEMS);
     register_counter(&BATCH_EXIST_KEY_PARTIAL_SUCCESSES);
     register_counter(&BATCH_EXIST_KEY_FAILED_ITEMS);
+    register_counter(&BATCH_GET_REPLICA_LIST_REQUESTS);
+    register_counter(&BATCH_GET_REPLICA_LIST_FAILURES);
+    register_counter(&BATCH_GET_REPLICA_LIST_PARTIAL_SUCCESSES);
+    register_counter(&BATCH_GET_REPLICA_LIST_ITEMS);
+    register_counter(&BATCH_GET_REPLICA_LIST_FAILED_ITEMS);
+    register_counter(&BATCH_PUT_START_REQUESTS);
+    register_counter(&BATCH_PUT_START_FAILURES);
+    register_counter(&BATCH_PUT_START_PARTIAL_SUCCESSES);
+    register_counter(&BATCH_PUT_START_ITEMS);
+    register_counter(&BATCH_PUT_START_FAILED_ITEMS);
     register_counter(&BATCH_QUERY_IP_REQUESTS);
     register_counter(&BATCH_QUERY_IP_FAILURES);
     register_counter(&BATCH_REPLICA_CLEAR_REQUESTS);
     register_counter(&BATCH_REPLICA_CLEAR_FAILURES);
     register_counter(&BATCH_PUT_END_REQUESTS);
     register_counter(&BATCH_PUT_END_FAILURES);
+    register_counter(&BATCH_PUT_END_PARTIAL_SUCCESSES);
+    register_counter(&BATCH_PUT_END_ITEMS);
+    register_counter(&BATCH_PUT_END_FAILED_ITEMS);
     register_counter(&BATCH_PUT_REVOKE_REQUESTS);
     register_counter(&BATCH_PUT_REVOKE_FAILURES);
+    register_counter(&BATCH_PUT_REVOKE_PARTIAL_SUCCESSES);
+    register_counter(&BATCH_PUT_REVOKE_ITEMS);
+    register_counter(&BATCH_PUT_REVOKE_FAILED_ITEMS);
     register_counter(&BATCH_REMOVE_REQUESTS);
     register_counter(&BATCH_REMOVE_FAILURES);
     register_counter(&BATCH_UPSERT_END_REQUESTS);
@@ -613,6 +840,13 @@ pub fn register_metrics() {
     register_gauge(&TOTAL_MEM_CAPACITY);
     register_gauge(&ALLOCATED_FILE_SIZE);
     register_gauge(&TOTAL_FILE_CAPACITY);
+    register_counter(&EVICTION_ATTEMPTS);
+    register_counter(&EVICTION_SUCCESS);
+    register_counter(&EVICTED_KEYS);
+    register_counter(&EVICTED_BYTES);
+    register_counter(&PUT_START_DISCARD_COUNT);
+    register_counter(&PUT_START_RELEASE_COUNT);
+    register_gauge(&PUT_START_DISCARDED_STAGING_BYTES);
 
     // Cache metrics
     register_counter(&MEM_CACHE_HITS);
@@ -770,6 +1004,78 @@ mod tests {
         let status = response.status();
         let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
         (status, String::from_utf8(body.to_vec()).unwrap())
+    }
+
+    #[test]
+    fn cpp_parity_master_metrics_test_cpp_mastermetricstest_initialstatustest() {
+        const CHILD_MARKER: &str = "MOONCAKE_INITIAL_METRICS_CHILD";
+        const TEST_NAME: &str = "metrics::tests::cpp_parity_master_metrics_test_cpp_mastermetricstest_initialstatustest";
+
+        if std::env::var_os(CHILD_MARKER).is_some() {
+            assert_eq!(master_metric_snapshot(), MasterMetricSnapshot::default());
+            register_metrics();
+            let names = prometheus::gather()
+                .into_iter()
+                .map(|family| family.get_name().to_string())
+                .collect::<std::collections::HashSet<_>>();
+            for expected in [
+                "mooncake_store_copy_start_total",
+                "mooncake_store_copy_start_failures_total",
+                "mooncake_store_copy_end_total",
+                "mooncake_store_copy_end_failures_total",
+                "mooncake_store_copy_revoke_total",
+                "mooncake_store_copy_revoke_failures_total",
+                "mooncake_store_move_start_total",
+                "mooncake_store_move_start_failures_total",
+                "mooncake_store_move_end_total",
+                "mooncake_store_move_end_failures_total",
+                "mooncake_store_move_revoke_total",
+                "mooncake_store_move_revoke_failures_total",
+                "mooncake_store_eviction_attempts_total",
+                "mooncake_store_eviction_success_total",
+                "mooncake_store_evicted_keys_total",
+                "mooncake_store_evicted_bytes_total",
+                "mooncake_store_batch_get_replica_list_total",
+                "mooncake_store_batch_get_replica_list_failures_total",
+                "mooncake_store_batch_get_replica_list_partial_successes_total",
+                "mooncake_store_batch_get_replica_list_items_total",
+                "mooncake_store_batch_get_replica_list_failed_items_total",
+                "mooncake_store_batch_put_start_total",
+                "mooncake_store_batch_put_start_failures_total",
+                "mooncake_store_batch_put_start_partial_successes_total",
+                "mooncake_store_batch_put_start_items_total",
+                "mooncake_store_batch_put_start_failed_items_total",
+                "mooncake_store_batch_put_end_partial_successes_total",
+                "mooncake_store_batch_put_end_items_total",
+                "mooncake_store_batch_put_end_failed_items_total",
+                "mooncake_store_batch_put_revoke_partial_successes_total",
+                "mooncake_store_batch_put_revoke_items_total",
+                "mooncake_store_batch_put_revoke_failed_items_total",
+                "mooncake_store_put_start_discard_total",
+                "mooncake_store_put_start_release_total",
+                "mooncake_store_put_start_discarded_staging_bytes",
+            ] {
+                assert!(
+                    names.contains(expected),
+                    "metric family is absent: {expected}"
+                );
+            }
+            return;
+        }
+
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .arg(TEST_NAME)
+            .arg("--exact")
+            .arg("--test-threads=1")
+            .env(CHILD_MARKER, "1")
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "fresh metrics child failed\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
     }
 
     #[tokio::test]

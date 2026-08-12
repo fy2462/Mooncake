@@ -109,6 +109,60 @@ lazy_static! {
         "total failed unmount_segment requests"
     )
     .unwrap();
+    pub static ref COPY_START_REQUESTS: IntCounter = IntCounter::new(
+        "mooncake_store_copy_start_total",
+        "total copy_start requests"
+    )
+    .unwrap();
+    pub static ref COPY_START_FAILURES: IntCounter = IntCounter::new(
+        "mooncake_store_copy_start_failures_total",
+        "total failed copy_start requests"
+    )
+    .unwrap();
+    pub static ref COPY_END_REQUESTS: IntCounter =
+        IntCounter::new("mooncake_store_copy_end_total", "total copy_end requests").unwrap();
+    pub static ref COPY_END_FAILURES: IntCounter = IntCounter::new(
+        "mooncake_store_copy_end_failures_total",
+        "total failed copy_end requests"
+    )
+    .unwrap();
+    pub static ref COPY_REVOKE_REQUESTS: IntCounter = IntCounter::new(
+        "mooncake_store_copy_revoke_total",
+        "total copy_revoke requests"
+    )
+    .unwrap();
+    pub static ref COPY_REVOKE_FAILURES: IntCounter = IntCounter::new(
+        "mooncake_store_copy_revoke_failures_total",
+        "total failed copy_revoke requests"
+    )
+    .unwrap();
+    pub static ref MOVE_START_REQUESTS: IntCounter = IntCounter::new(
+        "mooncake_store_move_start_total",
+        "total move_start requests"
+    )
+    .unwrap();
+    pub static ref MOVE_START_FAILURES: IntCounter = IntCounter::new(
+        "mooncake_store_move_start_failures_total",
+        "total failed move_start requests"
+    )
+    .unwrap();
+    pub static ref MOVE_END_REQUESTS: IntCounter =
+        IntCounter::new("mooncake_store_move_end_total", "total move_end requests").unwrap();
+    pub static ref MOVE_END_FAILURES: IntCounter = IntCounter::new(
+        "mooncake_store_move_end_failures_total",
+        "total failed move_end requests"
+    )
+    .unwrap();
+    pub static ref MOVE_REVOKE_REQUESTS: IntCounter = IntCounter::new(
+        "mooncake_store_move_revoke_total",
+        "total move_revoke requests"
+    )
+    .unwrap();
+    pub static ref MOVE_REVOKE_FAILURES: IntCounter = IntCounter::new(
+        "mooncake_store_move_revoke_failures_total",
+        "total failed move_revoke requests"
+    )
+    .unwrap();
     pub static ref UPSERT_REQUESTS: IntCounter =
         IntCounter::new("mooncake_store_upsert_total", "total upsert requests").unwrap();
     pub static ref UPSERT_FAILURES: IntCounter = IntCounter::new(

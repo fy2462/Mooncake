@@ -33626,13 +33626,18 @@
     "file": "master_metrics_test.cpp",
     "test": "MasterMetricsTest.InitialStatusTest"
    },
-   "reason": "Production prerequisite: add the missing C++-observable metric families and operation instrumentation in mooncake-store-master/src/metrics.rs and its service call sites, without introducing a metric-manager wrapper. Add cpp_parity_initial_metrics_status_is_zero to mooncake-store-master/tests/test_master_metrics.rs as an actually isolated fresh-process assertion: parent test spawns a child copy of the Rust test binary (or equivalent dedicated child assertion mode) with a private one-shot marker that prevents recursion; the child may take the process-local metrics lock only for local serialization, but the fresh child process is the isolation mechanism. Before any mutation, assert zero for every C++-listed memory/file/key gauge, single-operation and copy/move counter, eviction counter, all five batch counter matrices, and PutStart discard/release/staging gauges.",
+   "reason": "Rust metrics.rs:cpp_parity_master_metrics_test_cpp_mastermetricstest_initialstatustest launches an exact child copy of the test binary with a recursion guard, so no prior test can contaminate process-global Prometheus state. The child compares the typed 70-field MasterMetricSnapshot to its all-zero default, covering every C++ getter for Memory/file allocation, capacity and zero-safe ratio, key count, scalar and Copy/Move requests/failures, eviction, all four five-value batch matrices, and PutStart discard/release/staging state. It then registers and gathers metrics and asserts every newly introduced family is present. This row proves metric existence and fresh zero values only; non-zero request-path instrumentation remains assigned to the separate BasicRequest, BatchRequest, eviction, and SSD rows.",
    "review": {
     "oracle": "mooncake-store/tests/master_metrics_test.cpp:47-135 and mooncake-store/src/master_metric_manager.cpp",
     "reviewed": true
    },
-   "rust": [],
-   "status": "missing"
+   "rust": [
+    {
+     "file": "mooncake-store-master/src/metrics.rs",
+     "test": "cpp_parity_master_metrics_test_cpp_mastermetricstest_initialstatustest"
+    }
+   ],
+   "status": "covered"
   },
   {
    "behavior": "For a 16-MiB Memory segment and a 1,024-byte object, successful mount, PutStart/Revoke, PutStart/End, ExistKey, GetReplicaList, lease-expired Remove, RemoveAll returning one, and Unmount produce the exact cumulative operation counters and global/per-segment allocation, capacity, and ratio snapshots; unknown and empty segment ratios are zero.",
