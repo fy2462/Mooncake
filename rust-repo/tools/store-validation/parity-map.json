@@ -29685,13 +29685,18 @@
     "file": "ha/standby/hot_standby_service_test.cpp",
     "test": "HotStandbyServiceTest.TestStart_SnapshotOnlyWhenProviderFails"
    },
-   "reason": "Production prerequisite: on snapshot-only provider errors, process FatalError and update raw sync status to Failed before returning from HotStandbyService::start in hot_standby.rs. Add cpp_parity_snapshot_only_provider_error_is_returned_and_marks_failed to src/hot_standby.rs; inject a provider returning the exact sentinel Snapshot error, assert the same error text/variant, state Failed, applied/primary/lag zero, disconnected/not-syncing flags, unchanged empty MasterState, no worker, and safe stop. test_snapshot_only_bootstrap_propagates_snapshot_error omits the required failed-state assertion and current source leaves the status non-failed.",
+   "reason": "Rust injects an exact sentinel Snapshot provider error through snapshot-only HotStandbyService::start, returns the same error variant/text, and transitions from Recovering to Failed before return. The test also proves zero sequences/lag, disconnected and not syncing, unchanged empty state, no replication worker, and safe stop. Production marks both provider-read and all-candidates-restore failures fatal only when oplog fallback is disabled.",
    "review": {
-    "oracle": "mooncake-store/tests/ha/standby/hot_standby_service_test.cpp:383-396 and HotStandbyService::LoadSnapshotBaselineLocked",
+    "oracle": "mooncake-store/tests/ha/standby/hot_standby_service_test.cpp:383-396 and HotStandbyService::LoadSnapshotBaselineLocked; Rust hot_standby.rs cpp_parity_ha_standby_hot_standby_service_test_cpp_hotstandbyservicetest_teststart_snapshotonlywhenproviderfails",
     "reviewed": true
    },
-   "rust": [],
-   "status": "missing"
+   "rust": [
+    {
+     "file": "mooncake-store-master/src/hot_standby.rs",
+     "test": "cpp_parity_ha_standby_hot_standby_service_test_cpp_hotstandbyservicetest_teststart_snapshotonlywhenproviderfails"
+    }
+   ],
+   "status": "covered"
   },
   {
    "behavior": "A fresh standby reports metadata count zero.",

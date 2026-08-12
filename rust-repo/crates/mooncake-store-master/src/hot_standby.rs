@@ -1429,7 +1429,7 @@ mod tests {
     async fn test_oplog_polling_recovers_within_bounded_reconnect_budget() {
         let state = Arc::new(MasterState::empty());
         let mut service = HotStandbyService::new(
-            state,
+            state.clone(),
             HotStandbyConfig {
                 enable_oplog_following: true,
                 oplog_poll_interval_ms: 10,
@@ -1793,10 +1793,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_snapshot_only_bootstrap_propagates_snapshot_error() {
+    async fn cpp_parity_ha_standby_hot_standby_service_test_cpp_hotstandbyservicetest_teststart_snapshotonlywhenproviderfails()
+     {
         let state = Arc::new(MasterState::empty());
         let mut service = HotStandbyService::new(
-            state,
+            state.clone(),
             HotStandbyConfig {
                 enable_snapshot_bootstrap: true,
                 cluster_id: "cluster-a".to_string(),
@@ -1809,6 +1810,17 @@ mod tests {
             service.start().await,
             Err(HaError::Snapshot(message)) if message == "snapshot unavailable"
         ));
+        let status = service.sync_status();
+        assert_eq!(status.state, StandbyState::Failed);
+        assert_eq!(status.applied_seq_id, 0);
+        assert_eq!(status.primary_seq_id, 0);
+        assert_eq!(status.lag_entries, 0);
+        assert!(!status.is_connected);
+        assert!(!status.is_syncing);
+        assert!(state.objects.is_empty());
+        assert!(service.replication_thread.is_none());
+        service.stop();
+        assert_eq!(service.sync_status().state, StandbyState::Stopped);
     }
 
     #[tokio::test]
@@ -3051,6 +3063,12 @@ impl HotStandbyService {
                                     error
                                 );
                             } else {
+                                self.state_machine.process_event(StandbyEvent::FatalError);
+                                let mut status = self.sync_status.write();
+                                status.state = StandbyState::Failed;
+                                status.is_connected = false;
+                                status.is_syncing = false;
+                                drop(status);
                                 return Err(error);
                             }
                         }
@@ -3061,7 +3079,15 @@ impl HotStandbyService {
                             error
                         );
                     }
-                    Err(error) => return Err(error),
+                    Err(error) => {
+                        self.state_machine.process_event(StandbyEvent::FatalError);
+                        let mut status = self.sync_status.write();
+                        status.state = StandbyState::Failed;
+                        status.is_connected = false;
+                        status.is_syncing = false;
+                        drop(status);
+                        return Err(error);
+                    }
                 }
             }
         }
