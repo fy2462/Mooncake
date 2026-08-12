@@ -29756,13 +29756,18 @@
     "file": "ha/standby/hot_standby_service_test.cpp",
     "test": "HotStandbyServiceTest.TestGetLatestAppliedSequenceId"
    },
-   "reason": "Production prerequisite: add latest_applied_sequence_id to HotStandbyService and source it consistently from the recovered/applier boundary used by promotion. Add cpp_parity_fresh_standby_latest_applied_sequence_is_zero to src/hot_standby.rs; call the accessor on a fresh snapshot-only local service and assert exactly 0. OpLog store sequence tests and a constructed StandbySyncStatus do not call this runtime accessor.",
+   "reason": "Rust constructs a fresh production HotStandbyService in snapshot-only configuration and calls its public latest_applied_sequence_id runtime accessor before start, proving the initial value is exactly zero without substituting an OpLog-store value or a constructed status DTO.",
    "review": {
-    "oracle": "mooncake-store/tests/ha/standby/hot_standby_service_test.cpp:408-413 and HotStandbyService::GetLatestAppliedSequenceId",
+    "oracle": "mooncake-store/tests/ha/standby/hot_standby_service_test.cpp:408-413 and HotStandbyService::GetLatestAppliedSequenceId; Rust hot_standby.rs cpp_parity_ha_standby_hot_standby_service_test_cpp_hotstandbyservicetest_testgetlatestappliedsequenceid",
     "reviewed": true
    },
-   "rust": [],
-   "status": "missing"
+   "rust": [
+    {
+     "file": "mooncake-store-master/src/hot_standby.rs",
+     "test": "cpp_parity_ha_standby_hot_standby_service_test_cpp_hotstandbyservicetest_testgetlatestappliedsequenceid"
+    }
+   ],
+   "status": "covered"
   },
   {
    "behavior": "Declared/skipped etcd intent: the running replication loop updates synchronization metrics; in the executed non-etcd branch the only assertion is that Stop is safe.",

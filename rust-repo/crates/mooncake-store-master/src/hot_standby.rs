@@ -1823,6 +1823,21 @@ mod tests {
         assert_eq!(service.sync_status().state, StandbyState::Stopped);
     }
 
+    #[test]
+    fn cpp_parity_ha_standby_hot_standby_service_test_cpp_hotstandbyservicetest_testgetlatestappliedsequenceid()
+     {
+        let service = HotStandbyService::new(
+            Arc::new(MasterState::empty()),
+            HotStandbyConfig {
+                enable_snapshot_bootstrap: true,
+                cluster_id: "fresh-sequence-cluster".into(),
+                ..Default::default()
+            },
+        );
+
+        assert_eq!(service.latest_applied_sequence_id(), 0);
+    }
+
     #[tokio::test]
     async fn test_snapshot_only_bootstrap_uses_empty_baseline_when_snapshot_missing() {
         let state = Arc::new(MasterState::empty());
