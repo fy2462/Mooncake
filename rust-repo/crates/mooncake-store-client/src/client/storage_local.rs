@@ -1874,7 +1874,8 @@ fn failed_offload_metadata() -> proto::StorageObjectMetadata {
 mod tests {
     use super::*;
     use crate::local_storage_backend::{
-        AttachedLocalStorage, LocalStorageBackend, LocalStorageConfig, OffsetAllocatorConfig,
+        AttachedLocalStorage, BucketEvictionPolicy, BucketStorageBackend, BucketStorageConfig,
+        LocalStorageBackend, LocalStorageConfig, OffsetAllocatorConfig,
         OffsetAllocatorStorageBackend, OffsetEvictionPolicy,
     };
     use mooncake_store_master::proto as master_proto;
@@ -1946,6 +1947,81 @@ mod tests {
         assert!(!offset.exists(&storage_key));
         assert_eq!(offset.space_usage().0, 0);
         assert!(offset.scan_meta().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn cpp_parity_bucket_batch_completion_failure_is_atomic() {
+        let root = tempfile::tempdir().unwrap();
+        let config = BucketStorageConfig {
+            root_dir: root.path().to_path_buf(),
+            fsdir: "bucket-batch-completion-failure".to_string(),
+            bucket_size_limit: 8 * 1024,
+            bucket_keys_limit: 10,
+            eviction_policy: BucketEvictionPolicy::Fifo,
+            quota_bytes: 64 * 1024,
+            total_keys_limit: 100,
+        };
+        let backend_dir = config.root_dir.join(&config.fsdir);
+        let bucket = Arc::new(BucketStorageBackend::new(config));
+        let storage = AttachedLocalStorage::Bucket(Arc::clone(&bucket));
+        storage.storage_id().unwrap();
+        let baseline_usage = storage.space_usage();
+        let fixtures = [
+            (local_storage_key("tenant-a", "rollback-key-0"), b"value-0"),
+            (local_storage_key("tenant-a", "rollback-key-1"), b"value-1"),
+            (local_storage_key("tenant-a", "rollback-key-2"), b"value-2"),
+        ];
+
+        let mut committed_storage_keys = Vec::new();
+        for (storage_key, value) in &fixtures {
+            let pending = storage
+                .prepare_write(storage_key, value.len() as u64)
+                .unwrap();
+            storage
+                .commit_write(storage_key, *value, pending, Uuid::new_v4())
+                .unwrap();
+            committed_storage_keys.push(storage_key.clone());
+        }
+        assert_eq!(storage.scan_records().unwrap().len(), 3);
+        assert_ne!(storage.space_usage(), baseline_usage);
+
+        let result = finalize_offload_publication(
+            storage.clone(),
+            committed_storage_keys,
+            Err(StoreError::Internal(
+                "injected completion failure".to_string(),
+            )),
+        )
+        .await;
+
+        assert!(
+            matches!(result, Err(StoreError::Internal(message)) if message == "injected completion failure")
+        );
+        for (storage_key, _) in &fixtures {
+            assert!(matches!(
+                storage.read_object(storage_key),
+                Err(StoreError::KeyNotFound(key)) if key == *storage_key
+            ));
+        }
+        assert_eq!(storage.space_usage(), baseline_usage);
+        assert!(storage.scan_records().unwrap().is_empty());
+        assert_eq!(
+            std::fs::read_dir(backend_dir.join("buckets"))
+                .unwrap()
+                .count(),
+            0
+        );
+        assert_eq!(
+            std::fs::read_dir(backend_dir.join(".mooncake-tmp"))
+                .unwrap()
+                .count(),
+            0
+        );
+        assert!(
+            !backend_dir
+                .join(".mooncake-accepted-evictions.json")
+                .exists()
+        );
     }
 
     #[cfg(feature = "link-native")]
