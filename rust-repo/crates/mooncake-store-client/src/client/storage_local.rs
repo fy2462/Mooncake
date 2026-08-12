@@ -1,8 +1,8 @@
 use super::MooncakeClient;
 use super::storage::{OffloadTaskItem, PromotionTaskItem};
 use crate::local_storage_backend::{
-    AttachedLocalStorage, LocalStorageRecordMetadata, PendingStorageEviction, local_storage_key,
-    parse_local_storage_key,
+    AttachedLocalStorage, LocalStorageRecordMetadata, PendingStorageEviction,
+    is_anonymous_storage_key, local_storage_key, parse_local_storage_key,
 };
 use crate::proto;
 use async_trait::async_trait;
@@ -229,13 +229,26 @@ async fn resolve_pending_eviction_notification_with(
     replica_type: i32,
 ) -> StoreResult<PendingStorageEviction> {
     let evicted_keys = pending.keys();
+    let anonymous_keys = evicted_keys
+        .iter()
+        .filter(|key| is_anonymous_storage_key(key))
+        .cloned()
+        .collect::<HashSet<_>>();
+    let reportable_keys = evicted_keys
+        .into_iter()
+        .filter(|key| !is_anonymous_storage_key(key))
+        .collect::<Vec<_>>();
+    if reportable_keys.is_empty() {
+        return Ok(pending);
+    }
     let Err(EvictionNotificationError {
-        accepted_storage_keys,
+        mut accepted_storage_keys,
         source,
-    }) = notify_evicted_disk_replicas_with(notifier, &evicted_keys, replica_type).await
+    }) = notify_evicted_disk_replicas_with(notifier, &reportable_keys, replica_type).await
     else {
         return Ok(pending);
     };
+    accepted_storage_keys.extend(anonymous_keys);
 
     finalize_partially_accepted_eviction(storage, pending, &accepted_storage_keys)
         .await
@@ -339,6 +352,7 @@ fn prepare_recovered_local_disk_records_with_generation(
     metadata.sort_unstable_by(|left, right| left.storage_key.cmp(&right.storage_key));
     metadata
         .into_iter()
+        .filter(|record| !is_anonymous_storage_key(&record.storage_key))
         .map(|record| {
             let storage_key = record.storage_key;
             let (tenant_id, key) = parse_recovered_local_storage_key(&storage_key)?;
@@ -907,18 +921,6 @@ impl MooncakeClient {
         self.notify_offload_success_tasks(tasks, metadatas).await
     }
 
-    async fn notify_evicted_disk_replicas(
-        &mut self,
-        storage_keys: &[String],
-    ) -> Result<HashSet<String>, EvictionNotificationError> {
-        notify_evicted_disk_replicas_with(
-            self,
-            storage_keys,
-            proto::replica_descriptor::ReplicaType::LocalDisk as i32,
-        )
-        .await
-    }
-
     async fn run_local_disk_watermark_eviction(
         &mut self,
         high_watermark_ratio: f64,
@@ -933,27 +935,14 @@ impl MooncakeClient {
         })
         .await
         .map_err(|error| StoreError::Internal(error.to_string()))??;
-        let evicted_keys = pending.keys();
-        if let Err(EvictionNotificationError {
-            accepted_storage_keys,
-            source,
-        }) = self.notify_evicted_disk_replicas(&evicted_keys).await
-        {
-            return match finalize_partially_accepted_eviction(
-                storage,
-                pending,
-                &accepted_storage_keys,
-            )
-            .await
-            {
-                Ok(_) => Err(source),
-                Err(cleanup_error) => Err(StoreError::Internal(format!(
-                    "disk eviction notification failed: {source}; \
-                     acknowledged local eviction finalization failed: {cleanup_error}"
-                ))),
-            };
-        }
-        let count = evicted_keys.len();
+        let count = pending.keys().len();
+        let pending = resolve_pending_eviction_notification_with(
+            self,
+            storage.clone(),
+            pending,
+            proto::replica_descriptor::ReplicaType::LocalDisk as i32,
+        )
+        .await?;
         tokio::task::spawn_blocking(move || storage.commit_eviction(pending))
             .await
             .map_err(|error| StoreError::Internal(error.to_string()))??;
@@ -3199,6 +3188,70 @@ mod tests {
         )])
         .unwrap_err();
         assert!(matches!(error, StoreError::InvalidParams(_)));
+    }
+
+    #[test]
+    fn persistent_restart_recovery_skips_anonymous_records() {
+        let root = tempfile::tempdir().unwrap();
+        let config = LocalStorageConfig {
+            root_dir: root.path().to_path_buf(),
+            fsdir: "anonymous-recovery".to_string(),
+            enable_eviction: true,
+            quota_bytes: 4096,
+        };
+        {
+            let backend = LocalStorageBackend::new_persistent(config.clone());
+            backend.init().unwrap();
+            backend
+                .write_anonymous_object("anonymous-file", &[b'A'; 128])
+                .unwrap();
+            backend
+                .write_object(&local_storage_key("tenant-a", "reportable"), &[b'R'; 64])
+                .unwrap();
+        }
+
+        let restarted = LocalStorageBackend::new_persistent(config);
+        restarted.init().unwrap();
+        assert!(restarted.anonymous_object_exists("anonymous-file").unwrap());
+        let records =
+            prepare_recovered_local_disk_records_with_generation(restarted.scan_records().unwrap())
+                .unwrap();
+
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].task.tenant_id, "tenant-a");
+        assert_eq!(records[0].task.key, "reportable");
+    }
+
+    #[tokio::test]
+    async fn watermark_eviction_commits_anonymous_records_without_master_notification() {
+        let root = tempfile::tempdir().unwrap();
+        let backend = Arc::new(LocalStorageBackend::new(LocalStorageConfig {
+            root_dir: root.path().to_path_buf(),
+            fsdir: "anonymous-watermark".to_string(),
+            enable_eviction: true,
+            quota_bytes: 4096,
+        }));
+        backend.init().unwrap();
+        backend
+            .write_anonymous_object("anonymous-file", &[b'A'; 1024])
+            .unwrap();
+        let storage = AttachedLocalStorage::FilePerKey(Arc::clone(&backend));
+        let pending = storage.prepare_watermark_eviction(1e-12, 0.5e-12).unwrap();
+        assert_eq!(pending.keys().len(), 1);
+
+        let mut notifier = RecordingSuccessEvictionNotifier::default();
+        let resolved = resolve_pending_eviction_notification_with(
+            &mut notifier,
+            storage.clone(),
+            pending,
+            proto::replica_descriptor::ReplicaType::LocalDisk as i32,
+        )
+        .await
+        .unwrap();
+        assert!(notifier.calls.is_empty());
+        storage.commit_eviction(resolved).unwrap();
+
+        assert!(!backend.anonymous_object_exists("anonymous-file").unwrap());
     }
 
     #[test]

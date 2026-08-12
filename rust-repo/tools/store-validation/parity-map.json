@@ -18156,13 +18156,26 @@
     "file": "storage_backend_test.cpp",
     "test": "StorageBackendTest.StoreObjectEvictionWithEmptyKey"
    },
-   "reason": "This remains a real Rust result gap. C++ treats the omitted/default empty key as an anonymous file: the third quota write evicts it successfully but reports no victim key. Rust LocalStorageBackend accepts an &str write key yet its FilePerKey wire decoder rejects an empty key, and no test proves anonymous eviction can succeed without returning an empty-string victim. Add cpp_parity_storage_backend_test_cpp_storagebackendtest_storeobjectevictionwithemptykey_7b2b012f; define the Rust replacement result for anonymous/untracked writes, run the exact three-write pressure fixture, require the third write to succeed and make space, and require an empty reported-victim list.",
+   "reason": "Rust LocalStorageBackend::write_anonymous_object provides the C++ omitted-key result without weakening the persistent FilePerKey decoder's empty-key rejection: it maps a caller-supplied file identity into a reserved NUL-prefixed internal namespace and uses the ordinary production reservation/atomic-write/FIFO path. cpp_parity_file_per_key_anonymous_eviction_reports_no_victim_key sizes the quota to exactly two persisted 1-KiB anonymous Y records (accounting for Rust wire headers), writes f1/f2/f3, and proves the third succeeds with an empty victim list while f1 is absent and f2/f3 remain byte-exact. persistent_restart_recovery_skips_anonymous_records proves persistent restart retains anonymous data without publishing it as a LOCAL_DISK Store replica. watermark_eviction_commits_anonymous_records_without_master_notification proves the production watermark resolver sends no anonymous key to master yet returns the pending local eviction for commit. Ordinary writes are also proven unable to collide with the reserved namespace.",
    "review": {
     "oracle": "mooncake-store/tests/storage_backend_test.cpp:2774-2796, StorageBackend::StoreObject in mooncake-store/src/storage_backend.cpp, and Rust LocalStorageBackend write/record encode-decode/eviction paths",
     "reviewed": true
    },
-   "rust": [],
-   "status": "missing"
+   "rust": [
+    {
+     "file": "mooncake-store-client/src/local_storage_backend/mod.rs",
+     "test": "cpp_parity_file_per_key_anonymous_eviction_reports_no_victim_key"
+    },
+    {
+     "file": "mooncake-store-client/src/client/storage_local.rs",
+     "test": "persistent_restart_recovery_skips_anonymous_records"
+    },
+    {
+     "file": "mooncake-store-client/src/client/storage_local.rs",
+     "test": "watermark_eviction_commits_anonymous_records_without_master_notification"
+    }
+   ],
+   "status": "covered"
   },
   {
    "behavior": "Watermark eviction returns key_1 then key_2, deletes their files, keeps the newest file, and a second identical eviction returns no keys.",

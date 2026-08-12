@@ -36,6 +36,7 @@ const MIN_FREE_SPACE_BYTES: u64 = 256 * 1024 * 1024;
 const FORMAT_MARKER_FILE: &str = ".mooncake-storage-format";
 const STORAGE_ID_FILE: &str = ".mooncake-storage-id";
 const TEMP_DIRECTORY: &str = ".mooncake-tmp";
+const ANONYMOUS_STORAGE_KEY_PREFIX: &str = "\0anonymous:";
 const FILE_PER_KEY_PERSISTENT_FORMAT_MARKER_V1: &str = concat!(
     "backend=file-per-key\n",
     "format=protobuf-kv\n",
@@ -377,6 +378,26 @@ pub(crate) fn local_storage_key(tenant_id: &str, key: &str) -> String {
         tenant_id
     };
     format!("v1:{}:{tenant_id}{key}", tenant_id.len())
+}
+
+fn anonymous_storage_key(identity: &str) -> StoreResult<String> {
+    if identity.is_empty() || identity.contains('\0') {
+        return Err(StoreError::InvalidParams(
+            "anonymous storage identity must be non-empty and contain no NUL".to_string(),
+        ));
+    }
+    Ok(format!("{ANONYMOUS_STORAGE_KEY_PREFIX}{identity}"))
+}
+
+pub(crate) fn is_anonymous_storage_key(key: &str) -> bool {
+    key.starts_with(ANONYMOUS_STORAGE_KEY_PREFIX)
+}
+
+fn filter_reportable_victims(victims: Vec<String>) -> Vec<String> {
+    victims
+        .into_iter()
+        .filter(|key| !is_anonymous_storage_key(key))
+        .collect()
 }
 
 pub(crate) fn parse_local_storage_key(storage_key: &str) -> (&str, &str) {
@@ -1184,6 +1205,16 @@ impl LocalStorageBackend {
     ///
     /// C++ equivalent: `StorageBackendAdaptor::BatchOffload` (single-key path).
     pub fn write_object(&self, key: &str, data: &[u8]) -> StoreResult<Vec<String>> {
+        if is_anonymous_storage_key(key) {
+            return Err(StoreError::InvalidParams(
+                "FilePerKey storage key uses the reserved anonymous namespace".to_string(),
+            ));
+        }
+        self.write_object_raw(key, data)
+            .map(filter_reportable_victims)
+    }
+
+    fn write_object_raw(&self, key: &str, data: &[u8]) -> StoreResult<Vec<String>> {
         self.ensure_init()?;
         let pending = self.prepare_write(key, data.len() as u64)?;
         let evicted = pending.keys();
@@ -1202,6 +1233,23 @@ impl LocalStorageBackend {
             .into_iter()
             .map(|(key, data)| (key.to_string(), self.write_object(key, data)))
             .collect()
+    }
+
+    /// Store an anonymous file whose internal identity is not reportable as a
+    /// Store object key. Anonymous FIFO victims free capacity but are omitted
+    /// from the returned master-notification key list.
+    pub fn write_anonymous_object(&self, identity: &str, data: &[u8]) -> StoreResult<Vec<String>> {
+        let storage_key = anonymous_storage_key(identity)?;
+        self.write_object_raw(&storage_key, data)
+            .map(filter_reportable_victims)
+    }
+
+    pub fn read_anonymous_object(&self, identity: &str) -> StoreResult<Vec<u8>> {
+        self.read_object(&anonymous_storage_key(identity)?)
+    }
+
+    pub fn anonymous_object_exists(&self, identity: &str) -> StoreResult<bool> {
+        Ok(self.exists(&anonymous_storage_key(identity)?))
     }
 
     pub(crate) fn prepare_write(
@@ -3169,6 +3217,46 @@ mod tests {
                 .collect::<HashSet<_>>(),
             HashSet::from(["key1", "key3"])
         );
+    }
+
+    #[test]
+    fn cpp_parity_file_per_key_anonymous_eviction_reports_no_victim_key() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let anonymous_record_size =
+            file_per_key_v2_record_size(anonymous_storage_key("f1").unwrap().len() as u64, 1024)
+                .unwrap();
+        let backend = LocalStorageBackend::new_ephemeral(LocalStorageConfig {
+            root_dir: tmp.path().to_path_buf(),
+            fsdir: "anonymous-eviction".to_string(),
+            enable_eviction: true,
+            quota_bytes: anonymous_record_size * 2,
+        });
+        backend.init().unwrap();
+        let value = vec![b'Y'; 1024];
+        assert!(matches!(
+            backend.write_object(&anonymous_storage_key("collision").unwrap(), &value),
+            Err(StoreError::InvalidParams(message)) if message.contains("reserved anonymous")
+        ));
+
+        assert!(
+            backend
+                .write_anonymous_object("f1", &value)
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            backend
+                .write_anonymous_object("f2", &value)
+                .unwrap()
+                .is_empty()
+        );
+        let reported_victims = backend.write_anonymous_object("f3", &value).unwrap();
+
+        assert!(reported_victims.is_empty());
+        assert!(!backend.anonymous_object_exists("f1").unwrap());
+        assert_eq!(backend.read_anonymous_object("f2").unwrap(), value);
+        assert_eq!(backend.read_anonymous_object("f3").unwrap(), value);
+        assert_eq!(backend.scan_records().unwrap().len(), 2);
     }
 
     #[test]
