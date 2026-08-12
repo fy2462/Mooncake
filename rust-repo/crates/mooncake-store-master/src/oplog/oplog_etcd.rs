@@ -1073,6 +1073,23 @@ impl EtcdOpLogStore {
             .map(|(entries, _)| entries)
     }
 
+    /// Read entries strictly after `since_seq`.
+    ///
+    /// The legacy `read_since` API is intentionally inclusive because the
+    /// follower/recovery pipeline uses it as a replay boundary.  C++'s
+    /// `ReadOpLogSince` contract is exclusive, so expose that boundary
+    /// explicitly instead of changing the semantics of existing callers.
+    pub async fn read_after_async(
+        &self,
+        since_seq: u64,
+        max_count: usize,
+    ) -> Result<Vec<OpLogRecord>, HaError> {
+        let Some(start_seq) = since_seq.checked_add(1) else {
+            return Ok(Vec::new());
+        };
+        self.read_since_async(start_seq, max_count).await
+    }
+
     pub async fn read_since_with_revision_async(
         &self,
         since_seq: u64,

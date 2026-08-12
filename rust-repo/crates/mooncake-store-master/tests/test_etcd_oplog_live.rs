@@ -826,6 +826,34 @@ async fn cpp_parity_ha_oplog_etcd_oplog_store_test_cpp_etcdoplogstoretest_testre
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn cpp_parity_ha_oplog_etcd_oplog_store_test_cpp_etcdoplogstoretest_testreadoplogsince_excludes_start_sequence()
+ {
+    let Some(mut fixture) = LiveEtcdFixture::new("read-exclusive-boundary").await else {
+        return;
+    };
+    for payload in ["value1", "value2", "value3"] {
+        fixture
+            .store
+            .append(&opaque_record(fixture.view, payload))
+            .unwrap();
+    }
+    fixture.store.flush_async().await.unwrap();
+
+    let entries = fixture.store.read_after_async(1, 10).await.unwrap();
+    assert_eq!(
+        entries.iter().map(|entry| entry.seq).collect::<Vec<_>>(),
+        [2, 3]
+    );
+    assert_eq!(
+        entries
+            .iter()
+            .map(|entry| entry.payload.as_str())
+            .collect::<Vec<_>>(),
+        ["value2", "value3"]
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn cpp_parity_ha_oplog_etcd_oplog_store_test_cpp_etcdoplogstoretest_testdeserializeinvalidjson()
  {
     let Some(mut fixture) = LiveEtcdFixture::new("invalid-json").await else {

@@ -9834,13 +9834,18 @@
     "file": "ha/oplog/etcd_oplog_store_test.cpp",
     "test": "EtcdOpLogStoreTest.TestReadOpLogSince"
    },
-   "reason": "Rust production read_since is explicitly inclusive of since_seq, unlike the C++ exclusive ReadOpLogSince contract, and no real-etcd Rust test supplies an equivalent boundary oracle.",
+   "reason": "Rust preserves its inclusive read_since boundary for follower/recovery callers and now exposes production EtcdOpLogStore::read_after_async for the C++ exclusive ReadOpLogSince contract. The live test writes sequences 1..3 and asserts a real-etcd read after 1 returns exactly 2 and 3.",
    "review": {
     "oracle": "etcd_oplog_store_test.cpp TestReadOpLogSince and EtcdOpLogStore::ReadOpLogSinceWithRevision; Rust oplog_etcd.rs inclusive_range_start/read_since_with_revision_async",
     "reviewed": true
    },
-   "rust": [],
-   "status": "missing"
+   "rust": [
+    {
+     "file": "mooncake-store-master/tests/test_etcd_oplog_live.rs",
+     "test": "cpp_parity_ha_oplog_etcd_oplog_store_test_cpp_etcdoplogstoretest_testreadoplogsince_excludes_start_sequence"
+    }
+   ],
+   "status": "covered"
   },
   {
    "behavior": "Reading an empty oplog range after sequence 1000 succeeds and returns no entries.",
