@@ -10121,13 +10121,18 @@
     "file": "ha/oplog/etcd_oplog_store_test.cpp",
     "test": "EtcdOpLogStoreTest.TestInvalidClusterId_Rejected"
    },
-   "reason": "Rust only trims trailing slashes from key_prefix and accepts arbitrary embedded-slash prefixes; it has no equivalent namespace-validation rejection test. The C++ death mechanism is different, but the namespace-safety invariant is production behavior.",
+   "reason": "Rust's EtcdOpLogStore constructors now accept cluster identifiers, normalize trailing slashes, reject embedded slashes, invalid ASCII characters, and identifiers over 128 bytes with HaError::InvalidParams before store recovery performs any etcd I/O, then derive the exact /oplog/<cluster-id> prefix. The executable unit test covers invalid/cluster plus the adjacent validation boundaries and proves C++'s allowed empty/only-slashes identifiers retain the exact /oplog// entry, latest, snapshot, and watch namespace; all production/live-fixture construction uses this validated path.",
    "review": {
     "oracle": "etcd_oplog_store_test.cpp TestInvalidClusterId_Rejected and EtcdOpLogStore constructor/NormalizeAndValidateClusterId; Rust oplog_etcd.rs new_inner",
     "reviewed": true
    },
-   "rust": [],
-   "status": "missing"
+   "rust": [
+    {
+     "file": "mooncake-store-master/src/oplog/oplog_etcd.rs",
+     "test": "cpp_parity_etcd_oplog_rejects_invalid_cluster_id_before_io"
+    }
+   ],
+   "status": "covered"
   },
   {
    "behavior": "A cluster identifier with trailing slashes normalizes to the same namespace, so an entry written through the normalized store is readable through the original store.",

@@ -79,18 +79,19 @@ impl EtcdOpLogStore {
         parse_latest_sequence_value(response.kvs().first().map(|kv| kv.value()))
     }
 
-    /// Create an etcd-backed oplog store, recovering last_seq from the /latest key.
-    /// 创建 etcd oplog store，通过读取 `/latest` key 恢复 last_seq。
-    pub async fn new(client: etcd_client::Client, key_prefix: &str) -> Result<Self, HaError> {
-        Self::new_inner(client, key_prefix, None).await
+    /// Create an etcd-backed oplog store for a validated cluster identifier.
+    pub async fn new(client: etcd_client::Client, cluster_id: &str) -> Result<Self, HaError> {
+        let key_prefix = oplog_prefix_for_cluster_id(cluster_id)?;
+        Self::new_inner(client, &key_prefix, None).await
     }
 
     pub async fn new_leader(
         client: etcd_client::Client,
-        key_prefix: &str,
+        cluster_id: &str,
         election_key: impl Into<String>,
         producer_view_version: u64,
     ) -> Result<Self, HaError> {
+        let key_prefix = oplog_prefix_for_cluster_id(cluster_id)?;
         let election_key = election_key.into();
         if election_key.trim().is_empty() {
             return Err(HaError::InvalidBackend(
@@ -109,7 +110,7 @@ impl EtcdOpLogStore {
         })?;
         Self::new_inner(
             client,
-            key_prefix,
+            &key_prefix,
             Some(EtcdWriterFence {
                 election_key,
                 producer_view_version,
@@ -124,7 +125,7 @@ impl EtcdOpLogStore {
         key_prefix: &str,
         writer_fence: Option<EtcdWriterFence>,
     ) -> Result<Self, HaError> {
-        let prefix = key_prefix.trim_end_matches('/').to_string();
+        let prefix = key_prefix.to_string();
         let mut store = Self {
             client,
             key_prefix: prefix,
@@ -203,16 +204,28 @@ impl EtcdOpLogStore {
     }
 
     pub(super) fn format_entry_key(key_prefix: &str, seq: u64) -> String {
-        format!("{}/{:020}", key_prefix.trim_end_matches('/'), seq)
+        format!("{key_prefix}/{seq:020}")
     }
 
     /// Build the etcd key for the latest sequence pointer.
     fn latest_key(&self) -> String {
-        format!("{}/latest", self.key_prefix)
+        Self::format_latest_key(&self.key_prefix)
+    }
+
+    fn format_latest_key(key_prefix: &str) -> String {
+        format!("{key_prefix}/latest")
     }
 
     fn snapshot_key(&self, snapshot_id: &str) -> String {
-        format!("{}/snapshot/{}", self.key_prefix, snapshot_id)
+        Self::format_snapshot_key(&self.key_prefix, snapshot_id)
+    }
+
+    fn format_snapshot_key(key_prefix: &str, snapshot_id: &str) -> String {
+        format!("{key_prefix}/snapshot/{snapshot_id}")
+    }
+
+    fn format_watch_prefix(key_prefix: &str) -> String {
+        format!("{key_prefix}/")
     }
 
     /// Atomically commit buffered entries and the `/latest` pointer in one
@@ -299,6 +312,24 @@ impl EtcdOpLogStore {
     }
 }
 
+fn normalize_cluster_id(cluster_id: &str) -> Result<String, HaError> {
+    let normalized = cluster_id.trim_end_matches('/');
+    let is_valid = normalized.len() <= 128
+        && normalized
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b'.'));
+    if !is_valid {
+        return Err(HaError::InvalidParams(format!(
+            "Invalid cluster_id '{cluster_id}': allowed chars are [A-Za-z0-9_.-], max_len=128, no embedded slashes"
+        )));
+    }
+    Ok(normalized.to_string())
+}
+
+fn oplog_prefix_for_cluster_id(cluster_id: &str) -> Result<String, HaError> {
+    Ok(format!("/oplog/{}", normalize_cluster_id(cluster_id)?))
+}
+
 fn validate_buffer_sequence(buffer: &[OpLogRecord]) -> Result<(u64, u64), HaError> {
     let first_sequence = buffer
         .first()
@@ -363,9 +394,10 @@ fn validate_buffer_producer_view(
 mod tests {
     use super::{
         EtcdOpLogStore, block_on_runtime, classify_etcd_read_error,
-        current_thread_runtime_marker_for_test, decode_etcd_range_entry,
-        parse_latest_sequence_value, parse_snapshot_sequence_value, run_notifier_thread,
-        serialize_etcd_oplog_value, validate_buffer_producer_view, validate_buffer_sequence,
+        current_thread_runtime_marker_for_test, decode_etcd_range_entry, normalize_cluster_id,
+        oplog_prefix_for_cluster_id, parse_latest_sequence_value, parse_snapshot_sequence_value,
+        run_notifier_thread, serialize_etcd_oplog_value, validate_buffer_producer_view,
+        validate_buffer_sequence,
     };
     use crate::ha::{HaError, OpLogRecord};
     use std::sync::Arc;
@@ -382,6 +414,41 @@ mod tests {
             ),
             "/oplog/cluster/00000000000000000007"
         );
+    }
+
+    #[test]
+    fn cpp_parity_etcd_oplog_rejects_invalid_cluster_id_before_io() {
+        assert!(matches!(
+            normalize_cluster_id("invalid/cluster"),
+            Err(HaError::InvalidParams(message)) if message.contains("Invalid cluster_id")
+        ));
+        assert!(matches!(
+            normalize_cluster_id("bad cluster"),
+            Err(HaError::InvalidParams(_))
+        ));
+        assert!(matches!(
+            normalize_cluster_id(&"a".repeat(129)),
+            Err(HaError::InvalidParams(_))
+        ));
+        assert_eq!(normalize_cluster_id("cluster-a///").unwrap(), "cluster-a");
+        assert_eq!(
+            oplog_prefix_for_cluster_id("cluster-a///").unwrap(),
+            "/oplog/cluster-a"
+        );
+        for cluster_id in ["", "///"] {
+            let prefix = oplog_prefix_for_cluster_id(cluster_id).unwrap();
+            assert_eq!(prefix, "/oplog/");
+            assert_eq!(
+                EtcdOpLogStore::format_entry_key(&prefix, 7),
+                "/oplog//00000000000000000007"
+            );
+            assert_eq!(EtcdOpLogStore::format_latest_key(&prefix), "/oplog//latest");
+            assert_eq!(
+                EtcdOpLogStore::format_snapshot_key(&prefix, "snap"),
+                "/oplog//snapshot/snap"
+            );
+            assert_eq!(EtcdOpLogStore::format_watch_prefix(&prefix), "/oplog//");
+        }
     }
 
     #[test]
@@ -1174,7 +1241,7 @@ impl EtcdOpLogStore {
                 }
             }
 
-            let watch_prefix = format!("{}/", self.key_prefix.trim_end_matches('/'));
+            let watch_prefix = Self::format_watch_prefix(&self.key_prefix);
             let mut watch_client = self.client.clone().watch_client();
             let options = etcd_client::WatchOptions::new()
                 .with_prefix()

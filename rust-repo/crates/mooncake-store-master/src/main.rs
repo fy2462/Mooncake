@@ -193,14 +193,13 @@ async fn build_leader_oplog_manager(
             return None;
         }
     };
-    let oplog_prefix = format!("/oplog/{}", spec.cluster_namespace);
     let election_key = format!(
         "mooncake-store/{}/master_view",
         spec.cluster_namespace.trim_end_matches('/')
     );
     let store = match mooncake_store_master::oplog::EtcdOpLogStore::new_leader(
         client,
-        &oplog_prefix,
+        &spec.cluster_namespace,
         election_key,
         view_version,
     )

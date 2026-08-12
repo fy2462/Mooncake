@@ -38,6 +38,7 @@ fn put_end_record(view: u64, key: &str, payload: &str) -> OpLogRecord {
 
 struct LiveEtcdFixture {
     client: etcd_client::Client,
+    namespace: String,
     prefix: String,
     election_key: String,
     view: u64,
@@ -68,11 +69,13 @@ impl LiveEtcdFixture {
                 .revision(),
         )
         .expect("positive etcd revision");
-        let store = EtcdOpLogStore::new_leader(client.clone(), &prefix, election_key.clone(), view)
-            .await
-            .expect("create fenced etcd oplog writer");
+        let store =
+            EtcdOpLogStore::new_leader(client.clone(), &namespace, election_key.clone(), view)
+                .await
+                .expect("create fenced etcd oplog writer");
         Some(Self {
             client,
+            namespace,
             prefix,
             election_key,
             view,
@@ -207,7 +210,7 @@ async fn cpp_parity_ha_oplog_etcd_oplog_store_test_cpp_etcdoplogstoretest_testde
         return;
     };
     fixture.put_raw_entry_and_latest(77, b"{invalid-json").await;
-    let reader = EtcdOpLogStore::new(fixture.client.clone(), &fixture.prefix)
+    let reader = EtcdOpLogStore::new(fixture.client.clone(), &fixture.namespace)
         .await
         .unwrap();
 
@@ -316,10 +319,16 @@ async fn cpp_parity_ha_oplog_etcd_oplog_store_test_cpp_etcdoplogstoretest_testcl
     let Some(fixture) = LiveEtcdFixture::new("prefix-normalization").await else {
         return;
     };
-    let trailing_prefix = format!("{}///", fixture.prefix);
+    let trailing_cluster_id = format!(
+        "{}///",
+        fixture
+            .prefix
+            .strip_prefix("/oplog/")
+            .expect("fixture uses the production oplog prefix")
+    );
     let mut normalized_writer = EtcdOpLogStore::new_leader(
         fixture.client.clone(),
-        &trailing_prefix,
+        &trailing_cluster_id,
         fixture.election_key.clone(),
         fixture.view,
     )
@@ -413,7 +422,7 @@ async fn cpp_parity_ha_oplog_oplog_manager_test_cpp_oplogmanagertest_testwriteto
     };
     let LiveEtcdFixture {
         client,
-        prefix,
+        namespace,
         view,
         store,
         ..
@@ -426,7 +435,7 @@ async fn cpp_parity_ha_oplog_oplog_manager_test_cpp_oplogmanagertest_testwriteto
 
     assert_eq!(sequence, 1);
     assert_eq!(manager.latest_sequence(), 1);
-    let reader = EtcdOpLogStore::new(client, &prefix).await.unwrap();
+    let reader = EtcdOpLogStore::new(client, &namespace).await.unwrap();
     let entries = reader.read_since_async(1, 1).await.unwrap();
     assert_eq!(entries.len(), 1);
     assert_eq!(entries[0].seq, 1);

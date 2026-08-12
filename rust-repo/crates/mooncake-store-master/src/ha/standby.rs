@@ -394,7 +394,7 @@ impl CapabilityDrivenStandbyController {
             let client = etcd_client::Client::connect(endpoints, None)
                 .await
                 .map_err(|e| HaError::InvalidBackend(format!("etcd oplog connect: {e}")))?;
-            EtcdOpLogStore::new(client, &format!("/oplog/{cluster_id}")).await
+            EtcdOpLogStore::new(client, &cluster_id).await
         })?;
         self.service.set_oplog_store(Box::new(store));
         Ok(())
