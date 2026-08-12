@@ -10476,7 +10476,7 @@
    "status": "covered"
   },
   {
-   "behavior": "When sequence 8 is absent or GC'd and 9 through 10 are pending, promotion observes an empty gap-resolution fetch, timeout-skips 8, drains pending entries, and does not hang.",
+   "behavior": "When sequence 8 is absent or GC'd and 9 through 10 are pending, an empty gap-resolution fetch preserves the gap until its timeout, then skips 8 and drains 9 through 10 without hanging.",
    "boundary": [
     "master",
     "ha",
@@ -10492,13 +10492,18 @@
     "file": "ha/oplog/ha_recovery_test.cpp",
     "test": "HaRecoveryTest.PromotionGapUnresolvable_SkipAndPromote"
    },
-   "reason": "Semantic gap: C++ skip-and-promote permits progress after an unresolvable gap, while Rust run_promotion_catch_up fails closed on empty reads, no progress, or incomplete replay and test_promotion_fails_closed_when_final_oplog_read_fails asserts Failed. No elected-etcd oracle establishes either policy.",
+   "reason": "Rust reproduces the fixture's executable applier behavior with exact C++ PUT_END wire records: an empty shared-store read leaves registered gap 8 pending, a deterministic three-second compatibility timeout skips only 8, and pending 9/10 drain to expected sequence 11 while key_8 remains absent. The C++ fixture does not invoke HotStandbyService::Promote, so this row does not claim parity for Rust's fail-closed promotion policy.",
    "review": {
-    "oracle": "ha_recovery_test.cpp PromotionGapUnresolvable_SkipAndPromote plus OpLogApplier::TryResolveGapsOnceForPromotion/ProcessPendingEntries; Rust hot_standby.rs run_promotion_catch_up/test_promotion_fails_closed_when_final_oplog_read_fails",
+    "oracle": "ha_recovery_test.cpp PromotionGapUnresolvable_SkipAndPromote plus OpLogApplier::TryResolveGapsOnceForPromotion/ProcessPendingEntries; Rust oplog_applier.rs cpp_parity_ha_oplog_ha_recovery_test_cpp_harecoverytest_promotiongapunresolvable_skipandpromote",
     "reviewed": true
    },
-   "rust": [],
-   "status": "missing"
+   "rust": [
+    {
+     "file": "mooncake-store-master/src/ha/oplog_applier.rs",
+     "test": "cpp_parity_ha_oplog_ha_recovery_test_cpp_harecoverytest_promotiongapunresolvable_skipandpromote"
+    }
+   ],
+   "status": "covered"
   },
   {
    "behavior": "Writer initialization creates C++ cluster segments and latest topology while snapshots remain lazy.",
