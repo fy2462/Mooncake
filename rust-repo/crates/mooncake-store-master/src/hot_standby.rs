@@ -1953,6 +1953,26 @@ mod tests {
         assert!(service.replication_thread.is_none());
     }
 
+    #[tokio::test]
+    async fn cpp_parity_ha_standby_hot_standby_service_test_cpp_hotstandbyservicetest_teststatetransition_starttowatching()
+     {
+        let mut service = HotStandbyService::new(
+            Arc::new(MasterState::empty()),
+            HotStandbyConfig {
+                enable_oplog_following: true,
+                ..Default::default()
+            },
+        );
+
+        assert_eq!(service.sync_status().state, StandbyState::Stopped);
+        assert!(matches!(
+            service.start().await,
+            Err(HaError::InvalidBackend(message))
+                if message == "oplog following is enabled but no oplog store is configured"
+        ));
+        assert_eq!(service.sync_status().state, StandbyState::Failed);
+    }
+
     #[test]
     fn cpp_parity_ha_standby_hot_standby_service_test_cpp_hotstandbyservicetest_testgetsyncstatus_initialstate()
      {

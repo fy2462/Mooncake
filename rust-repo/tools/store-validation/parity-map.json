@@ -29260,13 +29260,18 @@
     "file": "ha/standby/hot_standby_service_test.cpp",
     "test": "HotStandbyServiceTest.TestStateTransition_StartToWatching"
    },
-   "reason": "Production prerequisite: export raw standby status transitions from the etcd-only controller and retain a separate unsupported-backend fail-fast result. Add cpp_parity_fresh_standby_transitions_only_through_supported_etcd to tests/test_ha_hot_standby_service.rs. For the supported subcase, create a unique live-etcd namespace, acquire the primary through LeaderCoordinator to obtain a real LeadershipSession, assert read_current_view equals that session view, write the shared oplog only through the current-view election-fenced EtcdOpLogStore::new_leader, and assert a stale/old-view writer is rejected. Start a separate production standby that obtains no candidate session/lease, assert initial Stopped then successful Watching, stop/join it, release the primary LeadershipSession and lease/keepalive, assert no current view, and delete all election/oplog namespace keys. The unsupported subcase must fail before the node under test acquires any LeadershipSession or lease, with the stable error and Failed status; no Serving process is added.",
+   "reason": "The C++ etcd branch is unconditionally GTEST_SKIP; its executable non-etcd branch asserts fresh Stopped, INTERNAL_ERROR from Start, then Failed. Rust uses the production unavailable-backend replacement (oplog following enabled with no store), proves the exact InvalidBackend missing-store error between Stopped and Failed, and does not claim the skipped etcd Stopped-to-Watching intent.",
    "review": {
-    "oracle": "mooncake-store/tests/ha/standby/hot_standby_service_test.cpp:160-173 and HotStandbyService state machine",
+    "oracle": "mooncake-store/tests/ha/standby/hot_standby_service_test.cpp:160-173 executable non-etcd branch; Rust hot_standby.rs cpp_parity_ha_standby_hot_standby_service_test_cpp_hotstandbyservicetest_teststatetransition_starttowatching",
     "reviewed": true
    },
-   "rust": [],
-   "status": "missing"
+   "rust": [
+    {
+     "file": "mooncake-store-master/src/hot_standby.rs",
+     "test": "cpp_parity_ha_standby_hot_standby_service_test_cpp_hotstandbyservicetest_teststatetransition_starttowatching"
+    }
+   ],
+   "status": "covered"
   },
   {
    "behavior": "With a bad endpoint in a build without etcd support, Start returns INTERNAL_ERROR; the real-etcd connection-failure branch is declared but skipped, and no state assertion is made in the executed branch.",
