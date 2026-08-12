@@ -9520,13 +9520,18 @@
     "file": "ha/leadership/high_availability_test.cpp",
     "test": "HighAvailabilityTest.WaitForViewChangeReturnsPromptlyOnLeaderLoss"
    },
-   "reason": "Rust wait_for_view_change polls at 200 ms and no real-etcd test asserts prompt deletion-to-no-view behavior or the C++ watch-driven timing bound; the live chaos test only observes eventual failover.",
+   "reason": "cpp_parity_high_availability_test_wait_for_view_change_returns_promptly_on_leader_loss uses a production live-etcd coordinator and a unique namespace. A separate Tokio task releases the renewed leader after 300 ms; the five-second wait returns no current view after the release but before three seconds, and a direct read confirms the key is absent. This proves the C++ observable prompt-deletion result through Rust's 200-ms polling implementation without claiming watch-driven internals.",
    "review": {
     "oracle": "high_availability_test.cpp WaitForViewChangeReturnsPromptlyOnLeaderLoss and LeaderCoordinator::WaitForViewChange",
     "reviewed": true
    },
-   "rust": [],
-   "status": "missing"
+   "rust": [
+    {
+     "file": "mooncake-store-master/tests/test_etcd_oplog_live.rs",
+     "test": "cpp_parity_high_availability_test_wait_for_view_change_returns_promptly_on_leader_loss"
+    }
+   ],
+   "status": "covered"
   },
   {
    "behavior": "With an unchanged leader, a 500-ms view-change wait returns timed-out/no-change no earlier than 400 ms and before three seconds.",
@@ -9541,13 +9546,18 @@
     "file": "ha/leadership/high_availability_test.cpp",
     "test": "HighAvailabilityTest.WaitForViewChangeTimesOutWhenStable"
    },
-   "reason": "Rust source has a deadline and 200-ms polling, but no discoverable real-etcd timing test proves the stable-leader timeout oracle.",
+   "reason": "cpp_parity_high_availability_test_wait_for_view_change_times_out_when_stable uses a production live-etcd coordinator and unique namespace. With the renewed leader unchanged, the 500-ms wait returns no change between 400 ms and three seconds; an immediate read proves the same exact view remains before explicit release.",
    "review": {
     "oracle": "high_availability_test.cpp WaitForViewChangeTimesOutWhenStable and LeaderCoordinator::WaitForViewChange",
     "reviewed": true
    },
-   "rust": [],
-   "status": "missing"
+   "rust": [
+    {
+     "file": "mooncake-store-master/tests/test_etcd_oplog_live.rs",
+     "test": "cpp_parity_high_availability_test_wait_for_view_change_times_out_when_stable"
+    }
+   ],
+   "status": "covered"
   },
   {
    "behavior": "When a leader exists and no view version is known, view-change wait returns that current view and its version in under one second.",
@@ -9562,13 +9572,18 @@
     "file": "ha/leadership/high_availability_test.cpp",
     "test": "HighAvailabilityTest.WaitForViewChangeReturnsCurrentViewImmediately"
    },
-   "reason": "Rust accepts a u64 known version rather than C++ nullopt, and no discoverable real-etcd Rust test uses an equivalent initial version and asserts prompt current-view return.",
+   "reason": "cpp_parity_high_availability_test_wait_for_view_change_returns_current_view_immediately uses a production live-etcd coordinator and unique namespace. Rust's known_version=0 is equivalent to C++ nullopt because etcd revisions are positive; the five-second wait returns the exact acquired address/version in under one second before explicit release.",
    "review": {
     "oracle": "high_availability_test.cpp WaitForViewChangeReturnsCurrentViewImmediately and LeaderCoordinator::wait_for_view_change",
     "reviewed": true
    },
-   "rust": [],
-   "status": "missing"
+   "rust": [
+    {
+     "file": "mooncake-store-master/tests/test_etcd_oplog_live.rs",
+     "test": "cpp_parity_high_availability_test_wait_for_view_change_returns_current_view_immediately"
+    }
+   ],
+   "status": "covered"
   },
   {
    "behavior": "After an acquired session starts a leadership monitor, externally stopping that lease keepalive reports lost leadership within five seconds.",

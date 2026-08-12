@@ -1,5 +1,6 @@
 use mooncake_store_master::ha::{LeaderCoordinator, OpLogRecord};
 use mooncake_store_master::oplog::{EtcdOpLogStore, OpLogManager, OpLogStore};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 use uuid::Uuid;
 
@@ -197,6 +198,119 @@ async fn cpp_parity_high_availability_test_basic_master_view_operations() {
         .await
         .unwrap();
     assert!(coordinator.read_current_view().await.unwrap().is_none());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn cpp_parity_high_availability_test_wait_for_view_change_returns_promptly_on_leader_loss() {
+    if !live_etcd_enabled() {
+        eprintln!("skipping live etcd oplog e2e; set MOONCAKE_ETCD_OPLOG_E2E=1 to enable");
+        return;
+    }
+
+    let namespace = format!("ha-etcd-view-loss-{}", Uuid::new_v4().simple());
+    let coordinator = Arc::new(
+        LeaderCoordinator::new_etcd(vec![live_etcd_endpoint()], &namespace)
+            .await
+            .unwrap(),
+    );
+    let acquired = coordinator
+        .try_acquire_leadership("0.0.0.0:5555", 5)
+        .await
+        .unwrap();
+    assert!(acquired.acquired);
+    let session = acquired.session.unwrap();
+    coordinator.try_renew_leadership(&session).await.unwrap();
+
+    let releaser = Arc::clone(&coordinator);
+    let release_session = session.clone();
+    let (released_tx, mut released_rx) = tokio::sync::oneshot::channel();
+    let started = Instant::now();
+    let release_task = tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        releaser.release_leadership(&release_session).await.unwrap();
+        released_tx.send(()).unwrap();
+    });
+    assert_eq!(
+        coordinator
+            .wait_for_view_change(session.view.view_version, Duration::from_secs(5))
+            .await
+            .unwrap(),
+        None
+    );
+    let elapsed = started.elapsed();
+    released_rx
+        .try_recv()
+        .expect("leadership release completes before the wait returns");
+    release_task.await.unwrap();
+    assert!(elapsed >= Duration::from_millis(300));
+    assert!(elapsed < Duration::from_secs(3));
+    assert!(coordinator.read_current_view().await.unwrap().is_none());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn cpp_parity_high_availability_test_wait_for_view_change_times_out_when_stable() {
+    if !live_etcd_enabled() {
+        eprintln!("skipping live etcd oplog e2e; set MOONCAKE_ETCD_OPLOG_E2E=1 to enable");
+        return;
+    }
+
+    let namespace = format!("ha-etcd-view-stable-{}", Uuid::new_v4().simple());
+    let coordinator = LeaderCoordinator::new_etcd(vec![live_etcd_endpoint()], &namespace)
+        .await
+        .unwrap();
+    let acquired = coordinator
+        .try_acquire_leadership("0.0.0.0:4444", 5)
+        .await
+        .unwrap();
+    assert!(acquired.acquired);
+    let session = acquired.session.unwrap();
+    coordinator.try_renew_leadership(&session).await.unwrap();
+
+    let started = Instant::now();
+    assert_eq!(
+        coordinator
+            .wait_for_view_change(session.view.view_version, Duration::from_millis(500))
+            .await
+            .unwrap(),
+        None
+    );
+    let elapsed = started.elapsed();
+    assert!(elapsed >= Duration::from_millis(400));
+    assert!(elapsed < Duration::from_secs(3));
+    assert_eq!(
+        coordinator.read_current_view().await.unwrap(),
+        Some(session.view.clone())
+    );
+    coordinator.release_leadership(&session).await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn cpp_parity_high_availability_test_wait_for_view_change_returns_current_view_immediately() {
+    if !live_etcd_enabled() {
+        eprintln!("skipping live etcd oplog e2e; set MOONCAKE_ETCD_OPLOG_E2E=1 to enable");
+        return;
+    }
+
+    let namespace = format!("ha-etcd-view-current-{}", Uuid::new_v4().simple());
+    let coordinator = LeaderCoordinator::new_etcd(vec![live_etcd_endpoint()], &namespace)
+        .await
+        .unwrap();
+    let acquired = coordinator
+        .try_acquire_leadership("0.0.0.0:3333", 5)
+        .await
+        .unwrap();
+    assert!(acquired.acquired);
+    let session = acquired.session.unwrap();
+
+    let started = Instant::now();
+    let current = coordinator
+        .wait_for_view_change(0, Duration::from_secs(5))
+        .await
+        .unwrap()
+        .expect("known version zero discovers the positive etcd view version");
+    assert!(started.elapsed() < Duration::from_secs(1));
+    assert_eq!(current, session.view);
+    coordinator.release_leadership(&session).await.unwrap();
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
