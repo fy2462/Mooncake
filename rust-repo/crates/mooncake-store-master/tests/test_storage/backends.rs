@@ -142,6 +142,47 @@ fn cpp_parity_storage_backend_test_storagebackendtest_storagebackendall() {
 }
 
 #[test]
+fn cpp_parity_storage_backend_test_adaptorscanmetaandisenableoffloading() {
+    let tmp = temp_dir();
+    let data = tmp.join("file-per-key-readiness");
+    let backend = StorageBackend::new_file_per_key_adaptor(&data, 10, 1024 * 1024);
+    assert!(backend.init());
+    assert!(backend.offloading_readiness().is_err());
+    assert!(
+        backend
+            .batch_offload(&[("before-scan".into(), b"rejected".to_vec())])
+            .is_err()
+    );
+    assert!(!backend.is_exist("before-scan").unwrap());
+    assert!(backend.scan_meta().unwrap().is_empty());
+    assert_eq!(backend.offloading_readiness().unwrap(), true);
+
+    let expected = vec![
+        ("k1".to_string(), vec![b'a'; 128]),
+        ("k2".to_string(), vec![b'b'; 256]),
+    ];
+    backend.batch_offload(&expected).unwrap();
+    assert_eq!(backend.offloading_readiness().unwrap(), true);
+
+    let restarted = StorageBackend::new_file_per_key_adaptor(&data, 10, 1024 * 1024);
+    assert!(restarted.init());
+    let mut scanned = restarted.scan_meta().unwrap();
+    scanned.sort_by(|left, right| left.0.cmp(&right.0));
+    assert_eq!(scanned, vec![("k1".into(), 128), ("k2".into(), 256)]);
+    assert_eq!(restarted.offloading_readiness().unwrap(), true);
+    assert_eq!(
+        restarted.batch_load(&["k1".into(), "k2".into()]).unwrap(),
+        expected
+    );
+
+    let strict = StorageBackend::new_file_per_key_adaptor(&data, 1, 1);
+    assert!(strict.init());
+    assert_eq!(strict.scan_meta().unwrap().len(), 2);
+    assert_eq!(strict.offloading_readiness().unwrap(), false);
+    assert_eq!(restarted.remove_all().unwrap(), 2);
+}
+
+#[test]
 fn cpp_parity_bucket_storage_backend_concurrent_read_write_delete() {
     // C++ StorageBackendTest.BucketStorageBackend_ConcurrentReadWriteDelete:
     // under concurrent unique-key writes, exact reads, and deletion attempts

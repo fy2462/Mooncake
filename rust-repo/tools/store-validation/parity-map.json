@@ -17466,13 +17466,18 @@
     "file": "storage_backend_test.cpp",
     "test": "StorageBackendTest.AdaptorScanMetaAndIsEnableOffloading"
    },
-   "reason": "The scan/restart portion is applicable, but the readiness/capacity query is a production API conflict. Rust master StorageBackend::is_enable_offloading is only a static backend-type predicate and the client FilePerKey backend exposes quota rejection during prepare_write rather than C++ meta-scanned readiness or a dynamic enabled result. Add cpp_parity_file_per_key_scan_readiness_and_capacity as a failing decision test: require pre-scan error, post-empty-scan true, two exact recovered key/size pairs after restart, and false under one-key/one-byte limits. Keep missing until Rust either exposes this stateful result boundary or an approved split marks only the absent API portion N/A.",
+   "reason": "Rust now exposes an explicit FilePerKey adaptor constructor and stateful offloading_readiness result alongside the existing static backend-type predicate. The production boundary rejects readiness before ScanMeta, returns true after an empty scan and after writing 128/256-byte values under 10-key/1-MiB limits, and a fresh adaptor scans the exact two key/size pairs and reloads both exact byte vectors. A second fresh adaptor over the same files with one-key/one-byte limits scans successfully and returns false. The test finishes by removing both files.",
    "review": {
     "oracle": "mooncake-store/tests/storage_backend_test.cpp:763-858, Rust mooncake-store-master/src/storage_backend.rs:415-424, and client FilePerKey scan/quota paths",
     "reviewed": true
    },
-   "rust": [],
-   "status": "missing"
+   "rust": [
+    {
+     "file": "mooncake-store-master/tests/test_storage/backends.rs",
+     "test": "cpp_parity_storage_backend_test_adaptorscanmetaandisenableoffloading"
+    }
+   ],
+   "status": "covered"
   },
   {
    "behavior": "New adaptor scans/loads all exact bytes after restart.",

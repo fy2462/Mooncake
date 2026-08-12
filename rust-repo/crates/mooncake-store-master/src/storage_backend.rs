@@ -30,6 +30,8 @@ use crate::storage_distributed::{FileSystemAdapter, create_filesystem_adapter};
 use chrono::Utc;
 use dashmap::DashMap;
 use mooncake_store_core::{TaskInfo, TaskStatus, TaskType};
+use parking_lot::Mutex;
+use std::collections::HashMap;
 use std::fs;
 use std::io::{BufReader, BufWriter, Read, Write};
 use std::os::fd::AsRawFd;
@@ -54,6 +56,12 @@ const MIN_FREE_SPACE_BYTES: u64 = 256 * 1024 * 1024;
 
 type AvailableSpaceProbe = dyn Fn(&Path) -> std::io::Result<u64> + Send + Sync;
 
+#[derive(Default)]
+struct AdaptorAccounting {
+    scanned: bool,
+    objects: HashMap<String, u64>,
+}
+
 /// The main storage backend for snapshot persistence and key-based file operations.
 /// 用于快照持久化和基于 key 的文件操作的主存储后端。
 pub struct StorageBackend {
@@ -63,6 +71,9 @@ pub struct StorageBackend {
     distributed_adapter: Option<Box<dyn FileSystemAdapter>>,
     available_space_probe: Box<AvailableSpaceProbe>,
     explicit_initialized: AtomicBool,
+    adaptor_accounting: Option<Mutex<AdaptorAccounting>>,
+    total_keys_limit: usize,
+    total_size_limit: u64,
 }
 
 // =============================================================================
@@ -85,6 +96,9 @@ impl StorageBackend {
                     distributed_adapter: None,
                     available_space_probe: Box::new(|path| fs2::available_space(path)),
                     explicit_initialized: AtomicBool::new(false),
+                    adaptor_accounting: None,
+                    total_keys_limit: usize::MAX,
+                    total_size_limit: u64::MAX,
                 }
             });
         }
@@ -97,6 +111,9 @@ impl StorageBackend {
             distributed_adapter: None,
             available_space_probe: Box::new(|path| fs2::available_space(path)),
             explicit_initialized: AtomicBool::new(false),
+            adaptor_accounting: None,
+            total_keys_limit: usize::MAX,
+            total_size_limit: u64::MAX,
         }
     }
 
@@ -114,6 +131,9 @@ impl StorageBackend {
             distributed_adapter: None,
             available_space_probe,
             explicit_initialized: AtomicBool::new(false),
+            adaptor_accounting: None,
+            total_keys_limit: usize::MAX,
+            total_size_limit: u64::MAX,
         }
     }
 
@@ -138,7 +158,23 @@ impl StorageBackend {
             distributed_adapter: Some(adapter),
             available_space_probe: Box::new(|path| fs2::available_space(path)),
             explicit_initialized: AtomicBool::new(false),
+            adaptor_accounting: None,
+            total_keys_limit: usize::MAX,
+            total_size_limit: u64::MAX,
         })
+    }
+
+    /// Build the C++ StorageBackendAdaptor-compatible FilePerKey boundary.
+    pub fn new_file_per_key_adaptor(
+        disk_dir: &Path,
+        total_keys_limit: usize,
+        total_size_limit: u64,
+    ) -> Self {
+        let mut backend = Self::new(StorageBackendType::FilePerKey, disk_dir);
+        backend.adaptor_accounting = Some(Mutex::new(AdaptorAccounting::default()));
+        backend.total_keys_limit = total_keys_limit;
+        backend.total_size_limit = total_size_limit;
+        backend
     }
 
     /// C++-compatible explicit initialization handshake. Construction already
@@ -282,6 +318,10 @@ impl StorageBackend {
             }
             _ => {}
         }
+        let mut accounting = self.adaptor_accounting.as_ref().map(|state| state.lock());
+        if accounting.as_ref().is_some_and(|state| !state.scanned) {
+            return Err("storage metadata has not been scanned".into());
+        }
         let dir = self.key_dir();
         if self.backend_type != StorageBackendType::Distributed {
             std::fs::create_dir_all(&dir)?;
@@ -296,6 +336,9 @@ impl StorageBackend {
                 }
                 let mut f = std::fs::File::create(&path)?;
                 f.write_all(value)?;
+            }
+            if let Some(accounting) = accounting.as_mut() {
+                accounting.objects.insert(key.clone(), value.len() as u64);
             }
         }
         Ok(())
@@ -340,6 +383,7 @@ impl StorageBackend {
             StorageBackendType::OffsetAllocator => return self.remove_keys_offset_allocator(keys),
             _ => {}
         }
+        let mut accounting = self.adaptor_accounting.as_ref().map(|state| state.lock());
         for key in keys {
             let path = self.key_path(key);
             if let Some(adapter) = self.distributed_adapter() {
@@ -348,6 +392,9 @@ impl StorageBackend {
                 }
             } else if path.exists() {
                 std::fs::remove_file(&path)?;
+            }
+            if let Some(accounting) = accounting.as_mut() {
+                accounting.objects.remove(key);
             }
         }
         Ok(())
@@ -379,6 +426,7 @@ impl StorageBackend {
             }
             _ => {}
         }
+        let mut accounting = self.adaptor_accounting.as_ref().map(|state| state.lock());
         let dir = self.key_dir();
         if !dir.exists() {
             return Ok(0);
@@ -390,6 +438,9 @@ impl StorageBackend {
             let name = entry.file_name().to_string_lossy().into_owned();
             if re.is_match(&name) {
                 std::fs::remove_file(entry.path())?;
+                if let Some(accounting) = accounting.as_mut() {
+                    accounting.objects.remove(&name);
+                }
                 count += 1;
             }
         }
@@ -405,6 +456,7 @@ impl StorageBackend {
             StorageBackendType::OffsetAllocator => return self.remove_all_offset_allocator(),
             _ => {}
         }
+        let mut accounting = self.adaptor_accounting.as_ref().map(|state| state.lock());
         let dir = self.key_dir();
         if !dir.exists() {
             return Ok(0);
@@ -412,30 +464,63 @@ impl StorageBackend {
         let count = std::fs::read_dir(&dir)?.count();
         std::fs::remove_dir_all(&dir)?;
         std::fs::create_dir_all(&dir)?;
+        if let Some(accounting) = accounting.as_mut() {
+            accounting.objects.clear();
+        }
         Ok(count)
     }
 
     /// Scan metadata for all per-key files: return (key, size) pairs.
     /// 扫描所有按 key 的文件的元数据：返回 (key, size) 对。
     pub fn scan_meta(&self) -> Result<Vec<(String, u64)>, Box<dyn std::error::Error>> {
-        match self.backend_type {
-            StorageBackendType::Distributed => return self.scan_meta_distributed(),
-            StorageBackendType::Bucket => return self.scan_meta_bucket(),
-            StorageBackendType::OffsetAllocator => return self.scan_meta_offset_allocator(),
-            _ => {}
-        }
-        let dir = self.key_dir();
-        if !dir.exists() {
-            return Ok(vec![]);
-        }
-        let mut results = Vec::new();
-        for entry in std::fs::read_dir(&dir)? {
-            let entry = entry?;
-            let name = entry.file_name().to_string_lossy().into_owned();
-            let meta = entry.metadata()?;
-            results.push((name, meta.len()));
+        // The adaptor lock spans filesystem enumeration and publication, so a
+        // concurrent write cannot be omitted from both the scan snapshot and
+        // the post-scan accounting update.
+        let mut adaptor_accounting = self.adaptor_accounting.as_ref().map(|state| state.lock());
+        let results = match self.backend_type {
+            StorageBackendType::Distributed => self.scan_meta_distributed()?,
+            StorageBackendType::Bucket => self.scan_meta_bucket()?,
+            StorageBackendType::OffsetAllocator => self.scan_meta_offset_allocator()?,
+            _ => {
+                let dir = self.key_dir();
+                if !dir.exists() {
+                    Vec::new()
+                } else {
+                    let mut results = Vec::new();
+                    for entry in std::fs::read_dir(&dir)? {
+                        let entry = entry?;
+                        let name = entry.file_name().to_string_lossy().into_owned();
+                        let meta = entry.metadata()?;
+                        results.push((name, meta.len()));
+                    }
+                    results
+                }
+            }
+        };
+        if let Some(accounting) = adaptor_accounting.as_mut() {
+            accounting.objects = results.iter().cloned().collect();
+            accounting.scanned = true;
         }
         Ok(results)
+    }
+
+    pub fn offloading_readiness(&self) -> Result<bool, Box<dyn std::error::Error>> {
+        let Some(accounting) = &self.adaptor_accounting else {
+            return Ok(self.is_enable_offloading());
+        };
+        let accounting = accounting.lock();
+        if !accounting.scanned {
+            return Err("storage metadata has not been scanned".into());
+        }
+        let total_size = accounting
+            .objects
+            .values()
+            .try_fold(0u64, |sum, size| sum.checked_add(*size))
+            .ok_or("storage metadata size overflow")?;
+        Ok(
+            accounting.objects.len() <= self.total_keys_limit
+                && total_size <= self.total_size_limit,
+        )
     }
 
     pub fn is_enable_offloading(&self) -> bool {
