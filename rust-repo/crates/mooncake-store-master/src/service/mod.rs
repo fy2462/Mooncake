@@ -3212,7 +3212,21 @@ mod snapshot_restore_tests {
             .get_mut(&TenantId::default().make_scoped_key(key))
             .unwrap()
             .lease_timeout = Some(SystemTime::UNIX_EPOCH);
+        let attempts_before = crate::metrics::MEM_EVICTION_ATTEMPTS.get();
+        let successes_before = crate::metrics::MEM_EVICTION_SUCCESS.get();
+        let keys_before = crate::metrics::MEM_EVICTED_KEYS.get();
+        let bytes_before = crate::metrics::MEM_EVICTED_BYTES.get();
         assert!(service.run_eviction_cycle_for_test(1).is_empty());
+        assert_eq!(
+            crate::metrics::MEM_EVICTION_ATTEMPTS.get(),
+            attempts_before + 1
+        );
+        assert_eq!(
+            crate::metrics::MEM_EVICTION_SUCCESS.get(),
+            successes_before + 1
+        );
+        assert_eq!(crate::metrics::MEM_EVICTED_KEYS.get(), keys_before);
+        assert_eq!(crate::metrics::MEM_EVICTED_BYTES.get(), bytes_before);
         let tasks = MasterService::offload_object_heartbeat(
             service,
             Request::new(proto::OffloadObjectHeartbeatRequest {

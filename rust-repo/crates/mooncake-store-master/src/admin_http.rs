@@ -113,7 +113,11 @@ pub fn admin_router(state: AdminRuntimeState) -> Router {
 async fn metrics_summary_handler(
     axum::extract::State(state): axum::extract::State<AdminRuntimeState>,
 ) -> String {
-    build_metrics_summary_text(&state)
+    format!(
+        "{} | {}",
+        build_metrics_summary_text(&state),
+        crate::metrics::summary(true)
+    )
 }
 
 async fn health_handler(

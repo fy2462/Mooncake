@@ -33866,13 +33866,18 @@
     "file": "master_metrics_test.cpp",
     "test": "MasterMetricsTest.SummaryUsesWindowRatesAndCumulativeEviction"
    },
-   "reason": "Production prerequisite: implement a production-used summary snapshot/window formatter plus generic, Memory, and NoF eviction accounting in mooncake-store-master/src/metrics.rs, without correctness sleeps. Add cpp_parity_summary_uses_window_rates_and_cumulative_eviction to mooncake-store-master/tests/test_master_metrics.rs; use deterministic/injectable elapsed-time control, baseline snapshot must contain literal Requests (Success/Total per sec): and PutStart=0.00/0.00; after exact PutStart requests/failures 4/1, batch PutStart requests/partial 5/2, generic+Memory eviction success/fail 3/4096 and 1 failure, and NoF eviction success/fail 1/2048 and 1 failure, active-window summary must contain Requests (Success/Total per sec):, PutStart=, Batch Requests (per sec, Eviction: Success/Attempts=1/2, AllocFail=0, keys=3, size=4.00 KB, Mem Eviction: Success/Attempts=1/2, keys=3, size=4.00 KB, and NoF Eviction: Success/Attempts=1/2, keys=1, size=2.00 KB, and must lack /s and raw PutStart=3/4; snapshot-update summary must contain exact Eviction: Success/Attempts=1/2, AllocFail=0, keys=3, size=4.00 KB; idle snapshot must contain PutStart=0.00/0.00 plus exact Eviction: Success/Attempts=1/2, AllocFail=0, keys=3, size=4.00 KB, Mem Eviction: Success/Attempts=1/2, keys=3, size=4.00 KB, and NoF Eviction: Success/Attempts=1/2, keys=1, size=2.00 KB.",
+   "reason": "Rust exposes the production summary at /metrics/summary and uses a monotonic, mutex-protected snapshot window. The isolated deterministic-clock test proves the 20 ms active window formats scalar PutStart as 150.00/200.00 and batch PutStart as 150.00/100.00/250.00, a non-updating read preserves the baseline, an updating read advances it, and the next idle window returns 0.00/0.00. Generic, Memory, and NoF eviction attempts/successes/keys/bytes remain cumulative with the exact C++ strings, while allocation failure is windowed; production Memory and NoF cycles update both their medium-specific and generic counters.",
    "review": {
     "oracle": "mooncake-store/tests/master_metrics_test.cpp:727-787 and mooncake-store/src/master_metric_manager.cpp summary formatting",
     "reviewed": true
    },
-   "rust": [],
-   "status": "missing"
+   "rust": [
+    {
+     "file": "mooncake-store-master/tests/test_master_metrics.rs",
+     "test": "cpp_parity_master_metrics_test_cpp_mastermetricstest_summaryuseswindowratesandcumulativeeviction"
+    }
+   ],
+   "status": "covered"
   },
   {
    "behavior": "From process baselines, one completed 2,048-byte Memory object increments only Memory total/count; adding its LocalDisk replica increments only SSD total/count; Remove restores all totals/counts; a LocalDisk-only object increments SSD total, and Get leaves Memory hit count/bytes unchanged while increasing SSD hit count and file hit bytes by 2,048.",

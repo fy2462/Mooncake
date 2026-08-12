@@ -625,6 +625,7 @@ pub(crate) fn run_eviction_cycle(state: &MasterState, target_count: usize) -> Ve
         state.runtime_config.lease_ttl,
     );
     let mut evicted = Vec::new();
+    let mut total_freed = 0u64;
     let offload_cap = if state.runtime_config.offload_on_evict {
         ((state.runtime_config.offloading_queue_limit as f64)
             * state.runtime_config.offload_cap_ratio)
@@ -706,9 +707,17 @@ pub(crate) fn run_eviction_cycle(state: &MasterState, target_count: usize) -> Ve
                         "automatic_eviction",
                     ) {
                         Ok(freed) => freed,
-                        Err(_) => return evicted,
+                        Err(_) => {
+                            crate::metrics::record_mem_eviction(
+                                !evicted.is_empty() || offload_enqueued > 0,
+                                evicted.len() as u64,
+                                total_freed,
+                            );
+                            return evicted;
+                        }
                     };
                     if freed != 0 {
+                        total_freed = total_freed.saturating_add(freed);
                         evicted.push(user_key);
                     }
                     drop(mutation_guard);
@@ -762,14 +771,27 @@ pub(crate) fn run_eviction_cycle(state: &MasterState, target_count: usize) -> Ve
                     "automatic_eviction",
                 ) {
                     Ok(freed) => freed,
-                    Err(_) => return evicted,
+                    Err(_) => {
+                        crate::metrics::record_mem_eviction(
+                            !evicted.is_empty() || offload_enqueued > 0,
+                            evicted.len() as u64,
+                            total_freed,
+                        );
+                        return evicted;
+                    }
                 };
                 if freed != 0 {
+                    total_freed = total_freed.saturating_add(freed);
                     evicted.push(user_key.unwrap_or(member_key));
                 }
             }
         }
     }
+    crate::metrics::record_mem_eviction(
+        !evicted.is_empty() || offload_enqueued > 0,
+        evicted.len() as u64,
+        total_freed,
+    );
     evicted
 }
 
@@ -858,6 +880,7 @@ pub(crate) fn run_nof_eviction_cycle(state: &MasterState, target_count: usize) -
         manager.select_for_eviction_with_lease_timeout_policy(&mut candidates, target_count, false);
 
     let mut evicted = Vec::new();
+    let mut total_freed = 0u64;
     for key in selected {
         let _mutation_guard = state.key_mutations.lock(&key);
         let Some(mut object) = state.objects.get_mut(&key) else {
@@ -880,6 +903,9 @@ pub(crate) fn run_nof_eviction_cycle(state: &MasterState, target_count: usize) -
         if removed.is_empty() {
             continue;
         }
+        let removed_bytes = removed
+            .iter()
+            .fold(0u64, |total, replica| total.saturating_add(replica.size));
         sync_cache_total_accounting(&mut object);
         let became_empty = object.replicas.is_empty();
         drop(object);
@@ -891,6 +917,11 @@ pub(crate) fn run_nof_eviction_cycle(state: &MasterState, target_count: usize) -
         };
         if let Some(object) = &removed_object {
             if account_removed_object_quota(state, object).is_err() {
+                crate::metrics::record_nof_eviction(
+                    !evicted.is_empty(),
+                    evicted.len() as u64,
+                    total_freed,
+                );
                 return evicted;
             }
             for mut entry in state.client_objects.iter_mut() {
@@ -903,15 +934,26 @@ pub(crate) fn run_nof_eviction_cycle(state: &MasterState, target_count: usize) -
             .persist_object_image_or_remove_or_fence(&key, "automatic_nof_eviction")
             .is_err()
         {
+            crate::metrics::record_nof_eviction(
+                !evicted.is_empty(),
+                evicted.len() as u64,
+                total_freed,
+            );
             return evicted;
         }
         if release_replicas(state, &removed).is_err() {
+            crate::metrics::record_nof_eviction(
+                !evicted.is_empty(),
+                evicted.len() as u64,
+                total_freed,
+            );
             return evicted;
         }
         state
             .kv_event_publisher
             .publish_removed(&user_key, "disk", &tenant_id, &group_id);
         evicted.push(user_key);
+        total_freed = total_freed.saturating_add(removed_bytes);
     }
 
     if !evicted.is_empty() || state.objects.is_empty() {
@@ -919,6 +961,7 @@ pub(crate) fn run_nof_eviction_cycle(state: &MasterState, target_count: usize) -
             .nof_eviction_requested
             .store(false, AtomicOrdering::Release);
     }
+    crate::metrics::record_nof_eviction(!evicted.is_empty(), evicted.len() as u64, total_freed);
     evicted
 }
 

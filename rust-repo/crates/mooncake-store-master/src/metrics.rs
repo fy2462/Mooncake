@@ -38,6 +38,7 @@ use prometheus::{
 use std::collections::{HashMap, HashSet};
 use std::net::SocketAddr;
 use std::sync::Mutex;
+use std::time::{Duration, Instant};
 
 mod batch;
 mod cache;
@@ -203,6 +204,46 @@ lazy_static! {
         IntCounter::new("mooncake_store_evicted_keys_total", "total keys evicted").unwrap();
     pub static ref EVICTED_BYTES: IntCounter =
         IntCounter::new("mooncake_store_evicted_bytes_total", "total bytes evicted").unwrap();
+    pub static ref MEM_EVICTION_ATTEMPTS: IntCounter = IntCounter::new(
+        "mooncake_store_mem_eviction_attempts_total",
+        "total memory eviction attempts"
+    )
+    .unwrap();
+    pub static ref MEM_EVICTION_SUCCESS: IntCounter = IntCounter::new(
+        "mooncake_store_mem_eviction_success_total",
+        "total successful memory evictions"
+    )
+    .unwrap();
+    pub static ref MEM_EVICTED_KEYS: IntCounter = IntCounter::new(
+        "mooncake_store_mem_evicted_keys_total",
+        "total keys evicted from memory"
+    )
+    .unwrap();
+    pub static ref MEM_EVICTED_BYTES: IntCounter = IntCounter::new(
+        "mooncake_store_mem_evicted_bytes_total",
+        "total bytes evicted from memory"
+    )
+    .unwrap();
+    pub static ref NOF_EVICTION_ATTEMPTS: IntCounter = IntCounter::new(
+        "mooncake_store_nof_eviction_attempts_total",
+        "total NoF eviction attempts"
+    )
+    .unwrap();
+    pub static ref NOF_EVICTION_SUCCESS: IntCounter = IntCounter::new(
+        "mooncake_store_nof_eviction_success_total",
+        "total successful NoF evictions"
+    )
+    .unwrap();
+    pub static ref NOF_EVICTED_KEYS: IntCounter = IntCounter::new(
+        "mooncake_store_nof_evicted_keys_total",
+        "total keys evicted from NoF"
+    )
+    .unwrap();
+    pub static ref NOF_EVICTED_BYTES: IntCounter = IntCounter::new(
+        "mooncake_store_nof_evicted_bytes_total",
+        "total bytes evicted from NoF"
+    )
+    .unwrap();
     pub static ref PUT_START_DISCARD_COUNT: IntCounter = IntCounter::new(
         "mooncake_store_put_start_discard_total",
         "total PutStart replicas discarded after the discard timeout"
@@ -218,6 +259,152 @@ lazy_static! {
         "current bytes retained by discarded PutStart staging replicas"
     )
     .unwrap();
+}
+
+#[derive(Clone, Copy, Default)]
+struct SummaryCounters {
+    put_start_requests: u64,
+    put_start_failures: u64,
+    put_start_allocation_failures: u64,
+    batch_put_start_requests: u64,
+    batch_put_start_failures: u64,
+    batch_put_start_partial_successes: u64,
+}
+
+impl SummaryCounters {
+    fn current() -> Self {
+        Self {
+            put_start_requests: PUT_START_REQUESTS.get(),
+            put_start_failures: PUT_START_FAILURES.get(),
+            put_start_allocation_failures: PUT_START_ALLOCATION_FAILURES.get(),
+            batch_put_start_requests: BATCH_PUT_START_REQUESTS.get(),
+            batch_put_start_failures: BATCH_PUT_START_FAILURES.get(),
+            batch_put_start_partial_successes: BATCH_PUT_START_PARTIAL_SUCCESSES.get(),
+        }
+    }
+}
+
+#[derive(Default)]
+struct SummaryState {
+    previous: Option<(Duration, SummaryCounters)>,
+}
+
+lazy_static! {
+    static ref SUMMARY_STATE: Mutex<SummaryState> = Mutex::new(SummaryState::default());
+    static ref SUMMARY_EPOCH: Instant = Instant::now();
+}
+
+fn summary_rate(value: u64, elapsed: Duration) -> f64 {
+    let seconds = elapsed.as_secs_f64();
+    if seconds > 0.0 {
+        value as f64 / seconds
+    } else {
+        0.0
+    }
+}
+
+fn summary_bytes(bytes: u64) -> String {
+    if bytes >= 1024 {
+        format!("{:.2} KB", bytes as f64 / 1024.0)
+    } else {
+        format!("{bytes} B")
+    }
+}
+
+/// Render the C++-compatible request-rate window at a deterministic process
+/// elapsed time. A non-updating read observes the current window without
+/// moving its baseline; an updating read atomically advances that baseline.
+pub fn summary_at(now: Duration, update_snapshot: bool) -> String {
+    let mut state = SUMMARY_STATE.lock().unwrap();
+    // Serialize collection with baseline advancement. Otherwise two concurrent
+    // updating readers could install an older counter snapshot after a newer
+    // one and make a later window count requests twice.
+    let current = SummaryCounters::current();
+    let (elapsed, previous) = state
+        .previous
+        .map(|(then, counters)| (now.saturating_sub(then), counters))
+        .unwrap_or((Duration::ZERO, current));
+
+    let put_requests = current
+        .put_start_requests
+        .saturating_sub(previous.put_start_requests);
+    let put_failures = current
+        .put_start_failures
+        .saturating_sub(previous.put_start_failures);
+    let put_successes = put_requests.saturating_sub(put_failures);
+    let allocation_failures = current
+        .put_start_allocation_failures
+        .saturating_sub(previous.put_start_allocation_failures);
+    let batch_requests = current
+        .batch_put_start_requests
+        .saturating_sub(previous.batch_put_start_requests);
+    let batch_partial = current
+        .batch_put_start_partial_successes
+        .saturating_sub(previous.batch_put_start_partial_successes);
+    let batch_failures = current
+        .batch_put_start_failures
+        .saturating_sub(previous.batch_put_start_failures);
+    let batch_successes = batch_requests
+        .saturating_sub(batch_failures)
+        .saturating_sub(batch_partial);
+
+    if update_snapshot {
+        state.previous = Some((now, current));
+    }
+    drop(state);
+
+    format!(
+        "Requests (Success/Total per sec): PutStart={:.2}/{:.2} | Batch Requests (per sec, Success/Partial/Total): PutStart={:.2}/{:.2}/{:.2} | Eviction: Success/Attempts={}/{}, AllocFail={}, keys={}, size={} | Mem Eviction: Success/Attempts={}/{}, keys={}, size={} | NoF Eviction: Success/Attempts={}/{}, keys={}, size={}",
+        summary_rate(put_successes, elapsed),
+        summary_rate(put_requests, elapsed),
+        summary_rate(batch_successes, elapsed),
+        summary_rate(batch_partial, elapsed),
+        summary_rate(batch_requests, elapsed),
+        EVICTION_SUCCESS.get(),
+        EVICTION_ATTEMPTS.get(),
+        allocation_failures,
+        EVICTED_KEYS.get(),
+        summary_bytes(EVICTED_BYTES.get()),
+        MEM_EVICTION_SUCCESS.get(),
+        MEM_EVICTION_ATTEMPTS.get(),
+        MEM_EVICTED_KEYS.get(),
+        summary_bytes(MEM_EVICTED_BYTES.get()),
+        NOF_EVICTION_SUCCESS.get(),
+        NOF_EVICTION_ATTEMPTS.get(),
+        NOF_EVICTED_KEYS.get(),
+        summary_bytes(NOF_EVICTED_BYTES.get()),
+    )
+}
+
+/// Render a production summary using the process monotonic clock.
+pub fn summary(update_snapshot: bool) -> String {
+    summary_at(SUMMARY_EPOCH.elapsed(), update_snapshot)
+}
+
+pub(crate) fn record_mem_eviction(success: bool, keys: u64, bytes: u64) {
+    EVICTION_ATTEMPTS.inc();
+    MEM_EVICTION_ATTEMPTS.inc();
+    if success {
+        EVICTION_SUCCESS.inc();
+        MEM_EVICTION_SUCCESS.inc();
+        EVICTED_KEYS.inc_by(keys);
+        EVICTED_BYTES.inc_by(bytes);
+        MEM_EVICTED_KEYS.inc_by(keys);
+        MEM_EVICTED_BYTES.inc_by(bytes);
+    }
+}
+
+pub(crate) fn record_nof_eviction(success: bool, keys: u64, bytes: u64) {
+    EVICTION_ATTEMPTS.inc();
+    NOF_EVICTION_ATTEMPTS.inc();
+    if success {
+        EVICTION_SUCCESS.inc();
+        NOF_EVICTION_SUCCESS.inc();
+        EVICTED_KEYS.inc_by(keys);
+        EVICTED_BYTES.inc_by(bytes);
+        NOF_EVICTED_KEYS.inc_by(keys);
+        NOF_EVICTED_BYTES.inc_by(bytes);
+    }
 }
 
 lazy_static! {
@@ -931,6 +1118,14 @@ pub fn register_metrics() {
     register_counter(&EVICTION_SUCCESS);
     register_counter(&EVICTED_KEYS);
     register_counter(&EVICTED_BYTES);
+    register_counter(&MEM_EVICTION_ATTEMPTS);
+    register_counter(&MEM_EVICTION_SUCCESS);
+    register_counter(&MEM_EVICTED_KEYS);
+    register_counter(&MEM_EVICTED_BYTES);
+    register_counter(&NOF_EVICTION_ATTEMPTS);
+    register_counter(&NOF_EVICTION_SUCCESS);
+    register_counter(&NOF_EVICTED_KEYS);
+    register_counter(&NOF_EVICTED_BYTES);
     register_counter(&PUT_START_DISCARD_COUNT);
     register_counter(&PUT_START_RELEASE_COUNT);
     register_gauge(&PUT_START_DISCARDED_STAGING_BYTES);
@@ -1206,6 +1401,7 @@ mod tests {
         let health: Value = serde_json::from_str(bodies["/health"].as_str()).unwrap();
         let leader: Value = serde_json::from_str(bodies["/leader"].as_str()).unwrap();
         assert_eq!(health["ha_state"], "starting");
+        assert!(bodies["/metrics/summary"].contains("Requests (Success/Total per sec):"));
         assert_eq!(bodies["/role"], "standby");
         assert_eq!(bodies["/ha_status"], "starting");
         assert_eq!(leader["present"], false);

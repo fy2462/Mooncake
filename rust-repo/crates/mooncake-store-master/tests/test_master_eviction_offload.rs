@@ -1,3 +1,4 @@
+use mooncake_store_master::metrics;
 use mooncake_store_master::proto;
 use mooncake_store_master::proto::master_service_server::MasterService;
 use mooncake_store_master::{MasterRuntimeConfig, MasterServiceImpl};
@@ -161,8 +162,16 @@ async fn test_offload_on_evict_keeps_one_memory_replica_and_queues_local_disk_wo
     .unwrap();
 
     tokio::time::sleep(Duration::from_millis(5)).await;
+    let attempts_before = metrics::MEM_EVICTION_ATTEMPTS.get();
+    let successes_before = metrics::MEM_EVICTION_SUCCESS.get();
+    let keys_before = metrics::MEM_EVICTED_KEYS.get();
+    let bytes_before = metrics::MEM_EVICTED_BYTES.get();
     let evicted = service.run_eviction_cycle_for_test(1);
     assert_eq!(evicted, vec!["evict-offload".to_string()]);
+    assert_eq!(metrics::MEM_EVICTION_ATTEMPTS.get(), attempts_before + 1);
+    assert_eq!(metrics::MEM_EVICTION_SUCCESS.get(), successes_before + 1);
+    assert_eq!(metrics::MEM_EVICTED_KEYS.get(), keys_before + 1);
+    assert_eq!(metrics::MEM_EVICTED_BYTES.get(), bytes_before + 256);
 
     let offload = MasterService::offload_object_heartbeat(
         &service,

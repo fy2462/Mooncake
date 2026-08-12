@@ -374,6 +374,77 @@ fn cpp_parity_master_metrics_test_cpp_mastermetricstest_basicrequesttest() {
     });
 }
 
+#[test]
+fn cpp_parity_master_metrics_test_cpp_mastermetricstest_summaryuseswindowratesandcumulativeeviction()
+ {
+    const CHILD_MARKER: &str = "MOONCAKE_SUMMARY_WINDOW_METRICS_CHILD";
+    const TEST_NAME: &str = "cpp_parity_master_metrics_test_cpp_mastermetricstest_summaryuseswindowratesandcumulativeeviction";
+    if std::env::var_os(CHILD_MARKER).is_none() {
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .arg(TEST_NAME)
+            .arg("--exact")
+            .arg("--test-threads=1")
+            .env(CHILD_MARKER, "1")
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "fresh summary metrics child failed\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        return;
+    }
+
+    let baseline = metrics::summary_at(Duration::ZERO, true);
+    assert!(baseline.contains("Requests (Success/Total per sec):"));
+    assert!(baseline.contains("PutStart=0.00/0.00"));
+
+    metrics::PUT_START_REQUESTS.inc_by(4);
+    metrics::PUT_START_FAILURES.inc();
+    metrics::BATCH_PUT_START_REQUESTS.inc_by(5);
+    metrics::BATCH_PUT_START_PARTIAL_SUCCESSES.inc_by(2);
+    metrics::EVICTION_ATTEMPTS.inc_by(2);
+    metrics::EVICTION_SUCCESS.inc();
+    metrics::EVICTED_KEYS.inc_by(3);
+    metrics::EVICTED_BYTES.inc_by(4096);
+    metrics::MEM_EVICTION_ATTEMPTS.inc_by(2);
+    metrics::MEM_EVICTION_SUCCESS.inc();
+    metrics::MEM_EVICTED_KEYS.inc_by(3);
+    metrics::MEM_EVICTED_BYTES.inc_by(4096);
+    metrics::NOF_EVICTION_ATTEMPTS.inc_by(2);
+    metrics::NOF_EVICTION_SUCCESS.inc();
+    metrics::NOF_EVICTED_KEYS.inc();
+    metrics::NOF_EVICTED_BYTES.inc_by(2048);
+
+    let window = metrics::summary_at(Duration::from_millis(20), false);
+    assert!(window.contains("Requests (Success/Total per sec):"));
+    assert!(window.contains("PutStart=150.00/200.00"));
+    assert!(window.contains("Batch Requests (per sec"));
+    assert!(window.contains("PutStart=150.00/100.00/250.00"));
+    assert!(!window.contains("/s"));
+    assert!(!window.contains("PutStart=3/4"));
+    let generic = "Eviction: Success/Attempts=1/2, AllocFail=0, keys=3, size=4.00 KB";
+    let memory = "Mem Eviction: Success/Attempts=1/2, keys=3, size=4.00 KB";
+    let nof = "NoF Eviction: Success/Attempts=1/2, keys=1, size=2.00 KB";
+    assert!(window.contains(generic));
+    assert!(window.contains(memory));
+    assert!(window.contains(nof));
+
+    let reported = metrics::summary_at(Duration::from_millis(20), true);
+    assert!(reported.contains(generic));
+    let idle = metrics::summary_at(Duration::from_millis(40), true);
+    assert!(idle.contains("PutStart=0.00/0.00"));
+    assert!(idle.contains(generic));
+    assert!(idle.contains(memory));
+    assert!(idle.contains(nof));
+
+    metrics::BATCH_PUT_START_REQUESTS.inc();
+    metrics::BATCH_PUT_START_FAILURES.inc();
+    let failed_batch = metrics::summary_at(Duration::from_millis(60), true);
+    assert!(failed_batch.contains("PutStart=0.00/0.00/50.00"));
+}
+
 #[tokio::test]
 async fn non_scalar_rpc_paths_do_not_contaminate_scalar_request_counters() {
     let _guard = METRICS_TEST_LOCK.lock().unwrap();
