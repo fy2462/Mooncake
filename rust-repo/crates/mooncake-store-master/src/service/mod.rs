@@ -1514,6 +1514,15 @@ impl PolicySaveTestBarrier {
 }
 
 impl MasterServiceImpl {
+    #[cfg(test)]
+    pub(crate) fn install_nof_allocation_barrier(
+        &self,
+    ) -> std::sync::Arc<state::NofAllocationTestBarrier> {
+        let barrier = std::sync::Arc::new(state::NofAllocationTestBarrier::new());
+        *self.state.nof_allocation_test_barrier.lock() = Some(barrier.clone());
+        barrier
+    }
+
     pub(crate) fn resolve_write_tenant(&self, raw: &str) -> Result<TenantId, Status> {
         if !self.state.runtime_config.enable_tenant_quota {
             return Ok(TenantId::default());
@@ -1667,6 +1676,28 @@ impl MasterServiceImpl {
         if self.state.runtime_config.enable_tenant_quota {
             self.state.tenant_quotas.write().register_object(tenant_id);
         }
+    }
+
+    pub(crate) fn unregister_tenant_metadata_object(
+        &self,
+        tenant_id: &TenantId,
+    ) -> Result<(), Status> {
+        if self.state.runtime_config.enable_tenant_quota
+            && let Err(error) = self
+                .state
+                .tenant_quotas
+                .write()
+                .unregister_object(tenant_id)
+        {
+            self.state.fence_after_invariant_failure(
+                "unregister_tenant_metadata_object",
+                &format!("tenant={tenant_id} error={error:?}"),
+            );
+            return Err(Status::unavailable(
+                "tenant quota accounting invariant failed while unregistering object",
+            ));
+        }
+        Ok(())
     }
 
     pub(crate) fn abort_tenant_quota(
@@ -2150,6 +2181,8 @@ impl MasterServiceImpl {
             // NoF segment 的段内空间分配器
             nof_allocator: RwLock::new(nof_allocator),
             nof_eviction_requested: AtomicBool::new(false),
+            #[cfg(test)]
+            nof_allocation_test_barrier: parking_lot::Mutex::new(None),
 
             // ── 持久化 / persistence ──
             // 快照后端的抽象接口（local-disk / hf3fs），用于 HA 状态备份与恢复
@@ -10304,6 +10337,85 @@ mod tenant_quota_parity_tests {
                 .unwrap()
                 .is_none()
         );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn cpp_parity_delete_waits_for_inflight_zero_charge_nof_put_start() {
+        let service = std::sync::Arc::new(MasterServiceImpl::with_runtime_config(
+            MasterRuntimeConfig {
+                enable_tenant_quota: true,
+                enable_nof: true,
+                tenant_quota_pool_capacity_bytes: 512,
+                tenant_quota_connector_uri: "/tmp/mooncake-tq-nof-inflight.yaml".into(),
+                ..Default::default()
+            },
+        ));
+        let client_id = Uuid::new_v4();
+        let segment_id = Uuid::new_v4();
+        MasterService::mount_no_f_segment(
+            service.as_ref(),
+            Request::new(proto::MountNoFSegmentRequest {
+                client_id: Some(uuid_to_proto(client_id)),
+                segment: Some(proto::NoFSegment {
+                    id: Some(uuid_to_proto(segment_id)),
+                    name: "quota-inflight-nof".into(),
+                    base: 0,
+                    size: 4096,
+                    te_endpoint: "transport://quota-inflight-nof".into(),
+                    client_id: Some(uuid_to_proto(client_id)),
+                }),
+            }),
+        )
+        .await
+        .unwrap();
+        service.upsert_tenant_quota_policy("tenant-a", 512).unwrap();
+        let allocation_barrier = service.install_nof_allocation_barrier();
+        let put_service = std::sync::Arc::clone(&service);
+        let put = tokio::spawn(async move {
+            MasterService::put_start(
+                put_service.as_ref(),
+                Request::new(proto::PutStartRequest {
+                    client_id: Some(uuid_to_proto(client_id)),
+                    key: "inflight-nof".into(),
+                    slice_length: 128,
+                    config: Some(proto::ReplicateConfig {
+                        replica_num: 0,
+                        nof_replica_num: 1,
+                        preferred_nof_segments: vec!["quota-inflight-nof".into()],
+                        ..Default::default()
+                    }),
+                    tenant_id: "tenant-a".into(),
+                }),
+            )
+            .await
+        });
+        allocation_barrier.wait_started();
+
+        let (delete_tx, delete_rx) = std::sync::mpsc::channel();
+        let delete_service = std::sync::Arc::clone(&service);
+        let delete = std::thread::spawn(move || {
+            delete_tx
+                .send(delete_service.delete_tenant_quota_policy("tenant-a"))
+                .unwrap();
+        });
+        let delete_result = delete_rx
+            .recv_timeout(std::time::Duration::from_millis(200))
+            .unwrap();
+        assert_eq!(
+            delete_result.unwrap_err().code(),
+            tonic::Code::FailedPrecondition
+        );
+
+        allocation_barrier.release();
+        put.await.unwrap().unwrap();
+        delete.join().unwrap();
+        let snapshot = service
+            .get_tenant_quota_snapshot("tenant-a")
+            .unwrap()
+            .unwrap();
+        assert_eq!(snapshot.used_bytes, 0);
+        assert_eq!(snapshot.reserved_bytes, 0);
+        assert_eq!(snapshot.metadata_object_count, 1);
     }
 
     #[test]

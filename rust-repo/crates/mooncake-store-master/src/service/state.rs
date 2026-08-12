@@ -94,6 +94,48 @@ pub(crate) struct ForegroundRequestGuard {
     gate: Arc<ForegroundRequestGate>,
 }
 
+#[cfg(test)]
+pub(crate) struct NofAllocationTestBarrier {
+    started: std::sync::Mutex<bool>,
+    started_cv: std::sync::Condvar,
+    released: std::sync::Mutex<bool>,
+    released_cv: std::sync::Condvar,
+}
+
+#[cfg(test)]
+impl NofAllocationTestBarrier {
+    pub(crate) fn new() -> Self {
+        Self {
+            started: std::sync::Mutex::new(false),
+            started_cv: std::sync::Condvar::new(),
+            released: std::sync::Mutex::new(false),
+            released_cv: std::sync::Condvar::new(),
+        }
+    }
+
+    pub(crate) fn wait_started(&self) {
+        let mut started = self.started.lock().unwrap();
+        while !*started {
+            started = self.started_cv.wait(started).unwrap();
+        }
+    }
+
+    pub(crate) fn release(&self) {
+        let mut released = self.released.lock().unwrap();
+        *released = true;
+        self.released_cv.notify_all();
+    }
+
+    pub(crate) fn pause(&self) {
+        *self.started.lock().unwrap() = true;
+        self.started_cv.notify_all();
+        let mut released = self.released.lock().unwrap();
+        while !*released {
+            released = self.released_cv.wait(released).unwrap();
+        }
+    }
+}
+
 #[derive(Debug, Default)]
 pub(crate) struct TaskLifecycleClock {
     #[cfg(test)]
@@ -301,6 +343,8 @@ pub(crate) struct MasterState {
     /// Set after NoF allocation pressure so the eviction worker runs even
     /// when allocator fragmentation is not reflected by the byte watermark.
     pub(crate) nof_eviction_requested: AtomicBool,
+    #[cfg(test)]
+    pub(crate) nof_allocation_test_barrier: Mutex<Option<Arc<NofAllocationTestBarrier>>>,
     /// 快照存储后端 / Snapshot storage backend: periodic backup and restore.
     pub(crate) storage_backend: RwLock<Option<StorageBackend>>,
     /// Shared oplog sink used by RPC handlers and background mutation workers.
@@ -689,6 +733,8 @@ impl MasterState {
             allocator: RwLock::new(SegmentAllocator::new()),
             nof_allocator: RwLock::new(SegmentAllocator::new()),
             nof_eviction_requested: AtomicBool::new(false),
+            #[cfg(test)]
+            nof_allocation_test_barrier: Mutex::new(None),
             storage_backend: RwLock::new(None),
             oplog_manager: Arc::new(crate::oplog::OpLogManager::new(None, 0)),
             promotion_in_flight: AtomicUsize::new(0),

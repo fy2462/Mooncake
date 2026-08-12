@@ -204,7 +204,13 @@ impl MasterServiceImpl {
         }
         // NoF 副本分配：使用显式 preferred_nof_segments；same-node NoF 组合按 C++ 拒绝。
         // NoF replica allocation: use explicit preferred_nof_segments; same-node NoF is rejected like C++.
+        // Count an in-flight NoF PutStart before entering the physical
+        // allocator. Policy deletion must not observe an empty tenant while
+        // this zero-memory-charge operation is still being admitted.
+        let mut nof_metadata_registered = false;
         if config.nof_replica_num > 0 {
+            self.register_tenant_metadata_object(&tenant_id);
+            nof_metadata_registered = true;
             let nof_replicas = match allocate_nof_replicas(
                 &self.state,
                 &scoped_key,
@@ -225,6 +231,7 @@ impl MasterServiceImpl {
                     } else {
                         release_replicas(&self.state, &replicas)?;
                         self.abort_tenant_quota(&tenant_id, reserved_quota_charge)?;
+                        self.unregister_tenant_metadata_object(&tenant_id)?;
                         if matches!(
                             status.code(),
                             tonic::Code::FailedPrecondition | tonic::Code::ResourceExhausted
@@ -277,7 +284,9 @@ impl MasterServiceImpl {
         };
         sync_cache_total_accounting(&mut object);
         self.state.objects.insert(scoped_key.clone(), object);
-        self.register_tenant_metadata_object(&tenant_id);
+        if !nof_metadata_registered {
+            self.register_tenant_metadata_object(&tenant_id);
+        }
         // 将 key 加入 processing_keys，防止并发 PutStart 冲突
         // Add key to processing_keys to prevent concurrent PutStart conflicts
         self.state.processing_keys.insert(scoped_key.clone(), ());

@@ -828,6 +828,10 @@ pub(crate) fn allocate_nof_replicas(
     if state.nof_segments.is_empty() {
         return Err(Status::failed_precondition("no NoF segments mounted"));
     }
+    #[cfg(test)]
+    if let Some(barrier) = state.nof_allocation_test_barrier.lock().take() {
+        barrier.pause();
+    }
 
     let config = ReplicateConfig {
         preferred_segments: preferred_segment_names.to_vec(),

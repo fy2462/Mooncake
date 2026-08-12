@@ -32092,13 +32092,18 @@
     "file": "master_service_tenant_quota_test.cpp",
     "test": "MasterServiceTenantQuotaTest.DeletePolicyWaitsForZeroChargePutStartMetadataCreate"
    },
-   "reason": "Production prerequisite: add a deterministic allocation checkpoint to the production NoF PutStart path so its concurrency result can be tested without wall-clock races. Add cpp_parity_delete_waits_for_zero_charge_nof_put_metadata_create to mooncake-store-master/tests/test_tenant_quota.rs; register tenant-a, mount one NoF segment, request replica_num=0/nof_replica_num=1 for nof-key/128, pause allocation after PutStart is in flight, start policy deletion and assert the delete future remains pending, release allocation, then assert PutStart succeeds, delete returns Code::FailedPrecondition with tenant not empty, and the exact snapshot tuple is used=0, reserved=0, metadata_object_count=1. This conditional C++ scenario remains required and must not be relabeled N/A.",
+   "reason": "Rust now registers the in-flight NoF PutStart as a tenant metadata object before entering physical allocation, and rolls that accounting back on allocation failure. A deterministic test-only allocation checkpoint pauses the production path, starts policy deletion, verifies it returns TENANT_NOT_EMPTY before allocation resumes, then releases allocation and asserts PutStart success plus the exact snapshot tuple used=0, reserved=0, metadata_object_count=1.",
    "review": {
     "oracle": "mooncake-store/tests/master_service_tenant_quota_test.cpp:768-822 under USE_NOF and Rust NoF PutStart/quota metadata creation",
     "reviewed": true
    },
-   "rust": [],
-   "status": "missing"
+   "rust": [
+    {
+     "file": "mooncake-store-master/src/service/mod.rs",
+     "test": "cpp_parity_delete_waits_for_inflight_zero_charge_nof_put_start"
+    }
+   ],
+   "status": "covered"
   },
   {
    "behavior": "With mounted memory capacity 300 and explicit tenant requests 200 and 400, effective quota bytes are exactly 100 for tenant-a and 200 for tenant-b.",
