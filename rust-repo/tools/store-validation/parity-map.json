@@ -30051,13 +30051,18 @@
     "file": "ha/standby/hot_standby_service_test.cpp",
     "test": "HotStandbyServiceTest.TestVerificationLoop_WhenEnabled"
    },
-   "reason": "The C++ etcd branch is unconditionally GTEST_SKIP, but its executable non-etcd branch still sets enable_verification=true before the Start/Stop safety check. Rust has no verification configuration or worker boundary, so a default-config lifecycle test cannot represent this input even though no verification result is asserted.",
+   "reason": "The C++ etcd branch is unconditionally GTEST_SKIP; its executable non-etcd branch only sets enable_verification=true, ignores Start's result, stops, and asserts no crash. Rust HotStandbyConfig now accepts the same explicit lifecycle input without silently ignoring a safety-relevant option: start fails closed with InvalidBackend because Rust has no verification implementation, and stop remains safe from Failed to Stopped. cpp_parity_ha_standby_hot_standby_service_test_cpp_hotstandbyservicetest_testverificationloop_whenenabled proves that exact explicit-input lifecycle and does not claim the skipped real-etcd verification behavior.",
    "review": {
-    "oracle": "mooncake-store/tests/ha/standby/hot_standby_service_test.cpp:440-451 and Rust HotStandbyConfig (no verification field)",
+    "oracle": "mooncake-store/tests/ha/standby/hot_standby_service_test.cpp:440-451 and Rust HotStandbyConfig/HotStandbyService lifecycle",
     "reviewed": true
    },
-   "rust": [],
-   "status": "missing"
+   "rust": [
+    {
+     "file": "mooncake-store-master/src/hot_standby.rs",
+     "test": "cpp_parity_ha_standby_hot_standby_service_test_cpp_hotstandbyservicetest_testverificationloop_whenenabled"
+    }
+   ],
+   "status": "covered"
   },
   {
    "behavior": "Declared/skipped etcd intent: with verification disabled, Start must not spawn a verification thread and Stop remains safe; the executed non-etcd branch only asserts no crash.",

@@ -79,6 +79,10 @@ pub struct HotStandbyConfig {
     /// Whether to follow the leader's oplog for continuous sync.
     /// 是否跟随 leader 的 oplog 进行持续同步。
     pub enable_oplog_following: bool,
+    /// Accept the C++ verification-loop lifecycle configuration. The C++
+    /// executable non-etcd oracle only requires safe start/stop; verification
+    /// results remain outside that fixture's asserted contract.
+    pub enable_verification: bool,
     /// Poll interval in milliseconds for oplog following.
     /// oplog 跟随的轮询间隔（毫秒）。
     pub oplog_poll_interval_ms: u64,
@@ -240,6 +244,7 @@ impl Default for HotStandbyConfig {
         Self {
             enable_snapshot_bootstrap: false,
             enable_oplog_following: false,
+            enable_verification: false,
             oplog_poll_interval_ms: 1000,
             cluster_id: String::new(),
         }
@@ -1902,6 +1907,27 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn cpp_parity_ha_standby_hot_standby_service_test_cpp_hotstandbyservicetest_testverificationloop_whenenabled()
+     {
+        let mut service = HotStandbyService::new(
+            Arc::new(MasterState::empty()),
+            HotStandbyConfig {
+                enable_verification: true,
+                ..Default::default()
+            },
+        );
+
+        assert!(matches!(
+            service.start().await,
+            Err(HaError::InvalidBackend(message))
+                if message == "standby verification is unavailable in the Rust backend"
+        ));
+        service.stop();
+        assert_eq!(service.sync_status().state, StandbyState::Stopped);
+        assert!(!service.is_running());
+    }
+
+    #[tokio::test]
     async fn cpp_parity_ha_standby_hot_standby_service_test_cpp_hotstandbyservicetest_testwarmstart_withlocalstate()
      {
         let mut service =
@@ -2239,6 +2265,7 @@ mod tests {
             HotStandbyConfig {
                 enable_snapshot_bootstrap: true,
                 enable_oplog_following: true,
+                enable_verification: false,
                 oplog_poll_interval_ms: 10,
                 cluster_id: "test_cluster".into(),
             },
@@ -2533,6 +2560,7 @@ mod tests {
             HotStandbyConfig {
                 enable_snapshot_bootstrap: true,
                 enable_oplog_following: true,
+                enable_verification: false,
                 oplog_poll_interval_ms: 10,
                 cluster_id: "test_cluster".into(),
             },
@@ -2651,6 +2679,7 @@ mod tests {
             HotStandbyConfig {
                 enable_snapshot_bootstrap: true,
                 enable_oplog_following: true,
+                enable_verification: false,
                 oplog_poll_interval_ms: 10,
                 cluster_id: "test_cluster".into(),
             },
@@ -2750,6 +2779,7 @@ mod tests {
             HotStandbyConfig {
                 enable_snapshot_bootstrap: true,
                 enable_oplog_following: true,
+                enable_verification: false,
                 oplog_poll_interval_ms: 10,
                 cluster_id: "test_cluster".into(),
             },
@@ -2890,6 +2920,7 @@ mod tests {
             HotStandbyConfig {
                 enable_snapshot_bootstrap: true,
                 enable_oplog_following: true,
+                enable_verification: false,
                 oplog_poll_interval_ms: 10,
                 cluster_id: "cluster-a".to_string(),
             },
@@ -3220,6 +3251,7 @@ mod tests {
             HotStandbyConfig {
                 enable_snapshot_bootstrap: true,
                 enable_oplog_following: true,
+                enable_verification: false,
                 oplog_poll_interval_ms: 10,
                 cluster_id: "cluster-a".into(),
             },
@@ -3422,6 +3454,16 @@ impl HotStandbyService {
         let start_result = self.state_machine.process_event(StandbyEvent::Start);
         if !start_result.allowed {
             return Err(HaError::UnavailableInCurrentStatus);
+        }
+        if self.config.enable_verification {
+            self.state_machine.process_event(StandbyEvent::FatalError);
+            let mut status = self.sync_status.write();
+            status.state = StandbyState::Failed;
+            status.is_connected = false;
+            status.is_syncing = false;
+            return Err(HaError::InvalidBackend(
+                "standby verification is unavailable in the Rust backend".to_string(),
+            ));
         }
         let mut status = self.sync_status.write();
         status.state = StandbyState::Connecting;
