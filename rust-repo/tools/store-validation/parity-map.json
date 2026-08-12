@@ -33557,13 +33557,15 @@
     "file": "master_metrics_test.cpp",
     "test": "MasterMetricsTest.PutStartReplicaAllocationFailureMetric"
    },
-   "reason": "Production prerequisite: add and increment the distinct PutStart allocation-failure metric alongside the existing general failure counter in mooncake-store-master/src/metrics.rs and PutStart allocation path. Add cpp_parity_put_start_no_available_handle_metrics to mooncake-store-master/tests/test_master_metrics.rs; lock metrics, record both baselines without mounting a segment, request a 1,024-byte single-replica PutStart, assert exact tonic Code::ResourceExhausted for the C++ NO_AVAILABLE_HANDLE replacement result, and assert both counters increased by exactly one.",
+   "reason": "Rust now increments a dedicated PutStart allocation-failure counter only at allocator no-handle exits and increments the general PutStart failure counter once at the RPC boundary. The executable metric test locks process counters, uses an empty service, requests one 1,024-byte Memory replica, asserts ResourceExhausted, and proves both counters advance exactly once.",
    "review": {
-    "oracle": "mooncake-store/tests/master_metrics_test.cpp:704-725 and mooncake-store/src/master_service.cpp PutStart allocation path",
+    "oracle": "mooncake-store/tests/master_metrics_test.cpp:704-725; mooncake-store/src/master_service.cpp PutStart allocation path; rust-repo/crates/mooncake-store-master/tests/test_master_metrics.rs::cpp_parity_put_start_no_available_handle_metrics",
     "reviewed": true
    },
-   "rust": [],
-   "status": "missing"
+   "rust": [
+    "mooncake-store-master/tests/test_master_metrics.rs::cpp_parity_put_start_no_available_handle_metrics"
+   ],
+   "status": "covered"
   },
   {
    "behavior": "Metric summary text uses windowed per-second request formatting and retains cumulative generic, Memory, and NoF eviction attempts/success/keys/sizes across baseline, active, snapshot-update, and idle windows; it has the asserted headings and absences including no /s and no raw PutStart=3/4.",

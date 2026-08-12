@@ -186,6 +186,7 @@ impl MasterServiceImpl {
             self.abort_tenant_quota(&tenant_id, reserved_quota_charge)?;
             reserved_quota_charge = 0;
             if !flexible_dual {
+                metrics::PUT_START_ALLOCATION_FAILURES.inc();
                 return Err(Status::resource_exhausted(format!(
                     "failed to allocate {replica_count} replica(s) for key {user_key}{}",
                     PUT_NO_SPACE_HELPER_STR,
@@ -224,6 +225,12 @@ impl MasterServiceImpl {
                     } else {
                         release_replicas(&self.state, &replicas)?;
                         self.abort_tenant_quota(&tenant_id, reserved_quota_charge)?;
+                        if matches!(
+                            status.code(),
+                            tonic::Code::FailedPrecondition | tonic::Code::ResourceExhausted
+                        ) {
+                            metrics::PUT_START_ALLOCATION_FAILURES.inc();
+                        }
                         return Err(status);
                     }
                 }
@@ -279,7 +286,6 @@ impl MasterServiceImpl {
         // returning so a promoted standby cannot reuse those ranges.
         self.persist_object_image_or_remove(&scoped_key, "put_start")?;
 
-        metrics::PUT_START_REQUESTS.inc();
         Ok(Response::new(proto::PutStartResponse {
             replicas: proto_replicas,
         }))

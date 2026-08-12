@@ -561,3 +561,125 @@ async fn cpp_parity_local_disk_capacity_heartbeat_replaces_not_accumulates() {
     }
     assert_eq!(metrics::TOTAL_FILE_CAPACITY.get(), baseline);
 }
+
+#[tokio::test]
+async fn cpp_parity_put_start_no_available_handle_metrics() {
+    let _guard = METRICS_TEST_LOCK.lock().unwrap();
+    let put_start_requests = metrics::PUT_START_REQUESTS.get();
+    let allocation_failures = metrics::PUT_START_ALLOCATION_FAILURES.get();
+    let put_start_failures = metrics::PUT_START_FAILURES.get();
+    let service = MasterServiceImpl::default();
+    let error = MasterService::put_start(
+        &service,
+        Request::new(proto::PutStartRequest {
+            client_id: Some(proto_uuid(Uuid::new_v4())),
+            key: "allocation_failure_key".into(),
+            slice_length: 1024,
+            tenant_id: String::new(),
+            config: Some(replicate_config("")),
+        }),
+    )
+    .await
+    .unwrap_err();
+
+    assert_eq!(error.code(), tonic::Code::ResourceExhausted);
+    assert_eq!(metrics::PUT_START_REQUESTS.get(), put_start_requests + 1);
+    assert_eq!(
+        metrics::PUT_START_ALLOCATION_FAILURES.get(),
+        allocation_failures + 1
+    );
+    assert_eq!(metrics::PUT_START_FAILURES.get(), put_start_failures + 1);
+}
+
+#[tokio::test]
+async fn put_start_nof_unavailable_counts_allocation_failure_once() {
+    let _guard = METRICS_TEST_LOCK.lock().unwrap();
+    let allocation_failures = metrics::PUT_START_ALLOCATION_FAILURES.get();
+    let service = MasterServiceImpl::with_runtime_config(MasterRuntimeConfig {
+        enable_nof: true,
+        ..Default::default()
+    });
+    let error = MasterService::put_start(
+        &service,
+        Request::new(proto::PutStartRequest {
+            client_id: Some(proto_uuid(Uuid::new_v4())),
+            key: "nof_allocation_failure_key".into(),
+            slice_length: 1024,
+            tenant_id: String::new(),
+            config: Some(proto::ReplicateConfig {
+                replica_num: 0,
+                nof_replica_num: 1,
+                ..Default::default()
+            }),
+        }),
+    )
+    .await
+    .unwrap_err();
+
+    assert_eq!(error.code(), tonic::Code::FailedPrecondition);
+    assert_eq!(
+        metrics::PUT_START_ALLOCATION_FAILURES.get(),
+        allocation_failures + 1
+    );
+}
+
+#[tokio::test]
+async fn put_start_flexible_dual_single_side_success_is_not_allocation_failure() {
+    let _guard = METRICS_TEST_LOCK.lock().unwrap();
+    let allocation_failures = metrics::PUT_START_ALLOCATION_FAILURES.get();
+    let service = MasterServiceImpl::with_runtime_config(MasterRuntimeConfig {
+        enable_nof: true,
+        ..Default::default()
+    });
+    let client_id = Uuid::new_v4();
+    mount_memory_segment(&service, client_id, "metrics-flexible-memory:1").await;
+    let response = MasterService::put_start(
+        &service,
+        Request::new(proto::PutStartRequest {
+            client_id: Some(proto_uuid(client_id)),
+            key: "flexible_single_side_key".into(),
+            slice_length: 1024,
+            tenant_id: String::new(),
+            config: Some(proto::ReplicateConfig {
+                replica_num: 1,
+                nof_replica_num: 1,
+                preferred_segment: "metrics-flexible-memory:1".into(),
+                ..Default::default()
+            }),
+        }),
+    )
+    .await
+    .unwrap()
+    .into_inner();
+
+    assert_eq!(response.replicas.len(), 1);
+    assert_eq!(
+        metrics::PUT_START_ALLOCATION_FAILURES.get(),
+        allocation_failures
+    );
+}
+
+#[tokio::test]
+async fn put_start_unavailable_gate_counts_request_and_failure() {
+    let _guard = METRICS_TEST_LOCK.lock().unwrap();
+    let put_start_requests = metrics::PUT_START_REQUESTS.get();
+    let put_start_failures = metrics::PUT_START_FAILURES.get();
+    let service = MasterServiceImpl::default();
+    service.set_service_available(false);
+    let error = MasterService::put_start(
+        &service,
+        Request::new(proto::PutStartRequest {
+            client_id: Some(proto_uuid(Uuid::new_v4())),
+            key: "unavailable_gate_key".into(),
+            slice_length: 1024,
+            tenant_id: String::new(),
+            config: Some(replicate_config("")),
+        }),
+    )
+    .await
+    .unwrap_err();
+
+    assert_eq!(error.code(), tonic::Code::Unavailable);
+    assert_eq!(metrics::PUT_START_REQUESTS.get(), put_start_requests + 1);
+    assert_eq!(metrics::PUT_START_FAILURES.get(), put_start_failures + 1);
+}

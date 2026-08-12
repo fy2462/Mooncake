@@ -251,8 +251,15 @@ impl MasterService for MasterServiceImpl {
         &self,
         request: Request<proto::PutStartRequest>,
     ) -> Result<Response<proto::PutStartResponse>, Status> {
-        let _foreground_request_guard = self.begin_foreground_request()?;
-        MasterServiceImpl::put_start_impl(self, request).await
+        metrics::PUT_START_REQUESTS.inc();
+        let result = match self.begin_foreground_request() {
+            Ok(_foreground_request_guard) => MasterServiceImpl::put_start_impl(self, request).await,
+            Err(status) => Err(status),
+        };
+        if result.is_err() {
+            metrics::PUT_START_FAILURES.inc();
+        }
+        result
     }
 
     async fn put_end(

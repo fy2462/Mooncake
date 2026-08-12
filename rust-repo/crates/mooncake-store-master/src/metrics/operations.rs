@@ -9,6 +9,11 @@ lazy_static! {
         "total failed put_start requests"
     )
     .unwrap();
+    pub static ref PUT_START_ALLOCATION_FAILURES: IntCounter = IntCounter::new(
+        "mooncake_store_put_start_allocation_failures_total",
+        "total put_start requests that failed replica allocation"
+    )
+    .unwrap();
     pub static ref PUT_END_REQUESTS: IntCounter =
         IntCounter::new("mooncake_store_put_end_total", "total put_end requests").unwrap();
     pub static ref PUT_END_FAILURES: IntCounter = IntCounter::new(
