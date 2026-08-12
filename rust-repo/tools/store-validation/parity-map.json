@@ -9598,13 +9598,18 @@
     "file": "ha/leadership/high_availability_test.cpp",
     "test": "HighAvailabilityTest.LeadershipMonitorReportsKeepAliveLoss"
    },
-   "reason": "Rust background keepalive demotes a role receiver on stream, send, or acknowledgement failure, but has no loss-reason callback and no discoverable real-etcd test inducing keepalive loss and observing demotion.",
+   "reason": "cpp_parity_high_availability_test_leadership_monitor_reports_keepalive_loss uses a production coordinator and unique live-etcd namespace. After acquisition, renewal, and keepalive startup, an independent etcd client revokes the exact session lease; the session-scoped production role receiver changes from Leader to Standby within five seconds and the master view is absent. Rust exposes role demotion rather than C++'s loss-reason callback, giving the same observable leadership-loss outcome.",
    "review": {
     "oracle": "high_availability_test.cpp LeadershipMonitorReportsKeepAliveLoss and coordinator_etcd.rs keepalive task",
     "reviewed": true
    },
-   "rust": [],
-   "status": "missing"
+   "rust": [
+    {
+     "file": "mooncake-store-master/tests/test_etcd_oplog_live.rs",
+     "test": "cpp_parity_high_availability_test_leadership_monitor_reports_keepalive_loss"
+    }
+   ],
+   "status": "covered"
   },
   {
    "behavior": "Resetting the global etcd Store client preserves later put/get behavior and allows a replacement client to grant and revoke a lease.",

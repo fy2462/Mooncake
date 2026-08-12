@@ -1,4 +1,4 @@
-use mooncake_store_master::ha::{LeaderCoordinator, OpLogRecord};
+use mooncake_store_master::ha::{LeaderCoordinator, LeaderRole, OpLogRecord};
 use mooncake_store_master::oplog::{EtcdOpLogStore, OpLogManager, OpLogStore};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -311,6 +311,49 @@ async fn cpp_parity_high_availability_test_wait_for_view_change_returns_current_
     assert!(started.elapsed() < Duration::from_secs(1));
     assert_eq!(current, session.view);
     coordinator.release_leadership(&session).await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn cpp_parity_high_availability_test_leadership_monitor_reports_keepalive_loss() {
+    if !live_etcd_enabled() {
+        eprintln!("skipping live etcd oplog e2e; set MOONCAKE_ETCD_OPLOG_E2E=1 to enable");
+        return;
+    }
+
+    let namespace = format!("ha-etcd-view-monitor-{}", Uuid::new_v4().simple());
+    let coordinator = LeaderCoordinator::new_etcd(vec![live_etcd_endpoint()], &namespace)
+        .await
+        .unwrap();
+    let acquired = coordinator
+        .try_acquire_leadership("0.0.0.0:7777", 3)
+        .await
+        .unwrap();
+    assert!(acquired.acquired);
+    let session = acquired.session.unwrap();
+    coordinator.try_renew_leadership(&session).await.unwrap();
+    let mut role = coordinator.subscribe_role_for_session(&session).unwrap();
+    assert_eq!(*role.borrow(), LeaderRole::Leader);
+    let keepalive = coordinator
+        .start_leadership_keepalive(&session)
+        .await
+        .unwrap();
+
+    let lease_id = session.owner_token.parse::<i64>().unwrap();
+    let mut external = etcd_client::Client::connect([live_etcd_endpoint()], None)
+        .await
+        .unwrap();
+    external.lease_revoke(lease_id).await.unwrap();
+
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while *role.borrow_and_update() != LeaderRole::Standby {
+            role.changed().await.unwrap();
+        }
+    })
+    .await
+    .expect("keepalive loss demotes the production role receiver within five seconds");
+    assert_eq!(*role.borrow(), LeaderRole::Standby);
+    assert!(coordinator.read_current_view().await.unwrap().is_none());
+    drop(keepalive);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
