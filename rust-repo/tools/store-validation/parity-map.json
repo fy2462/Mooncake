@@ -12259,13 +12259,14 @@
     "file": "ha/oplog/oplog_manager_test.cpp",
     "test": "OpLogManagerTest.TestAllocateEntry"
    },
-   "reason": "Semantic gap: Rust has no allocation/reservation API or pre-persist record object; SequencedOpLogWorker assigns ownership during durable submission.",
+   "reason": "C++ AllocateEntry exposes a pre-persistence reservation object, advances the sequence, and retains that object in a private manager deque even if persistence never follows. Rust deliberately has no corresponding product operation: SequencedOpLogWorker assigns a sequence and commits it inside one serialized durable command, so exposing a fabricated reservation test would weaken its no-gap ordering contract.",
    "review": {
+    "na_category": "absent-rust-product-boundary",
     "oracle": "oplog_manager_test.cpp TestAllocateEntry and OpLogManager::AllocateEntry; Rust oplog_manager.rs/SequencedOpLogWorker durable submission",
     "reviewed": true
    },
    "rust": [],
-   "status": "missing"
+   "status": "not-applicable"
   },
   {
    "behavior": "Persisting an allocated entry without a configured store returns INTERNAL_ERROR.",
@@ -12595,13 +12596,14 @@
     "file": "ha/oplog/oplog_manager_test.cpp",
     "test": "OpLogManagerTest.TestWriteToEtcd_Failure"
    },
-   "reason": "Semantic gap: despite its name this asserts no-store INTERNAL_ERROR, while Rust manager submission with no worker returns Ok(0).",
+   "reason": "This fixture duplicates OpLogManagerTest.TestPersistEntry: both allocate the same PUT_END entry on a manager with no store, call PersistEntry once, and assert INTERNAL_ERROR. The canonical TestPersistEntry row remains missing because Rust's disabled-HA manager intentionally treats persistence as a successful no-op; excluding this duplicate does not hide that unresolved semantic difference.",
    "review": {
+    "na_category": "noncanonical-duplicate-source",
     "oracle": "oplog_manager_test.cpp TestWriteToEtcd_Failure and OpLogManager::PersistEntry; Rust oplog_manager.rs submit_payload",
     "reviewed": true
    },
    "rust": [],
-   "status": "missing"
+   "status": "not-applicable"
   },
   {
    "behavior": "The skipped placeholder reserves a retry contract for failed or uncertain ordered-etcd writes.",
@@ -12786,13 +12788,14 @@
     "file": "ha/oplog/oplog_manager_test.cpp",
     "test": "OpLogManagerTest.TestAllocateEntry_ChecksumValid"
    },
-   "reason": "Rust wire tests calculate and validate checksums but expose no AllocateEntry equivalent; reservation-before-persistence remains absent.",
+   "reason": "The asserted checksum belongs to the C++ AllocateEntry reservation object before persistence. Rust has compatible XXH32 wire checksum validation but deliberately exposes no pre-persistence reservation object: its sequenced worker assigns and durably commits in one serialized command, so a checksum-only helper test cannot establish this lifecycle boundary.",
    "review": {
+    "na_category": "absent-rust-product-boundary",
     "oracle": "oplog_manager_test.cpp TestAllocateEntry_ChecksumValid and OpLogManager::AllocateEntry; Rust oplog_wire.rs checksum tests",
     "reviewed": true
    },
    "rust": [],
-   "status": "missing"
+   "status": "not-applicable"
   },
   {
    "behavior": "A reserved REMOVE entry preserves operation, key, empty payload, positive timestamp, valid checksum, and nonzero prefix hash.",
@@ -12808,13 +12811,14 @@
     "file": "ha/oplog/oplog_manager_test.cpp",
     "test": "OpLogManagerTest.TestAllocateEntry_FieldsComplete"
    },
-   "reason": "Rust wire serialization asserts sequence, operation, key, checksum, and prefix hash, but not allocated REMOVE lifecycle, timestamp positivity, or pre-persist reservation.",
+   "reason": "The complete fields are observed on the C++ AllocateEntry object while it is only reserved and buffered. Rust validates equivalent durable wire fields, but has no product API returning a pre-persistence entry: sequence assignment and durable commit are one worker command, and manufacturing a test-only reservation would violate rather than map that boundary.",
    "review": {
+    "na_category": "absent-rust-product-boundary",
     "oracle": "oplog_manager_test.cpp TestAllocateEntry_FieldsComplete and OpLogManager::AllocateEntry; Rust test_oplog.rs C++ envelope serialization",
     "reviewed": true
    },
    "rust": [],
-   "status": "missing"
+   "status": "not-applicable"
   },
   {
    "behavior": "Starting the replication follower makes its health boundary true, then stopping makes that boundary false.",
