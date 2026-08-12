@@ -15239,13 +15239,18 @@
     "file": "ha/snapshot/snapshot_child_process_test.cpp",
     "test": "SnapshotChildProcessTest.PersistState_FailFast_StopsOnFirstError"
    },
-   "reason": "No discoverable Rust test injects catalog payload-write failure and asserts the first-error-only, ordered multi-payload contract.",
+   "reason": "The executable Rust catalog publisher test injects failure for every object-store upload with no snapshot backup directory. It proves the production publisher attempts exactly one key, that key is metadata, and the returned first error contains metadata but excludes segments, task_manager, and manifest.",
    "review": {
     "oracle": "snapshot_child_process_test.cpp PersistState_FailFast_StopsOnFirstError and master_snapshot_manager.cpp PersistState upload sequence; Rust snapshot writer",
     "reviewed": true
    },
-   "rust": [],
-   "status": "missing"
+   "rust": [
+    {
+     "file": "mooncake-store-master/tests/test_catalog_snapshot.rs",
+     "test": "cpp_parity_snapshot_persist_without_backup_stops_on_metadata_failure"
+    }
+   ],
+   "status": "covered"
   },
   {
    "behavior": "With a snapshot backup directory, failed uploads report all four payload failures and save metadata, segments, task_manager, and manifest.txt under mooncake_snapshot_save_backup.",
@@ -15264,13 +15269,18 @@
     "file": "ha/snapshot/snapshot_child_process_test.cpp",
     "test": "SnapshotChildProcessTest.UploadFail_WithBackupDir_SavesAllFiles"
    },
-   "reason": "No discoverable Rust test injects catalog upload failure and verifies all-payload error aggregation plus all backup artifacts.",
+   "reason": "The executable Rust catalog publisher test enables a real temporary snapshot backup directory and injects failure for every object-store upload. It proves production attempts metadata, segments, task_manager, and manifest.txt in exact order, aggregates all four named failures, and writes all four payloads under mooncake_snapshot_save_backup.",
    "review": {
     "oracle": "snapshot_child_process_test.cpp UploadFail_WithBackupDir_SavesAllFiles and master_snapshot_manager.cpp PersistState/master_snapshot_repository.cpp UploadPayloadFile",
     "reviewed": true
    },
-   "rust": [],
-   "status": "missing"
+   "rust": [
+    {
+     "file": "mooncake-store-master/tests/test_catalog_snapshot.rs",
+     "test": "cpp_parity_snapshot_persist_with_backup_collects_four_failures_and_payloads"
+    }
+   ],
+   "status": "covered"
   },
   {
    "behavior": "Zero base/size -> INVALID_PARAMS; mount, duplicate mount, duplicate/missing unmount, remount all succeed. MountSegment/UnmountSegment. Fixture then saves the live Master, restores a fresh Master, saves again, compares deterministic snapshot bytes, and compares keys/default-tenant state, segments/statistics, replica metadata/status/descriptors, local-disk/offload state, task fields, and preferred-allocation behavior.",

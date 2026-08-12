@@ -76,7 +76,7 @@ pub struct CatalogBackedSnapshotProvider {
     cluster_id: String,
     catalog_store: Box<dyn SnapshotCatalogStore>,
     object_store: Arc<dyn SnapshotObjectStore>,
-    restore_backup_dir: Option<PathBuf>,
+    snapshot_backup_dir: Option<PathBuf>,
 }
 impl CatalogBackedSnapshotProvider {
     pub fn new(
@@ -88,12 +88,12 @@ impl CatalogBackedSnapshotProvider {
             cluster_id: cluster_id.into(),
             catalog_store,
             object_store,
-            restore_backup_dir: None,
+            snapshot_backup_dir: None,
         }
     }
 
-    pub fn with_restore_backup_dir(mut self, backup_dir: Option<PathBuf>) -> Self {
-        self.restore_backup_dir = backup_dir.filter(|path| !path.as_os_str().is_empty());
+    pub fn with_snapshot_backup_dir(mut self, backup_dir: Option<PathBuf>) -> Self {
+        self.snapshot_backup_dir = backup_dir.filter(|path| !path.as_os_str().is_empty());
         self
     }
 
@@ -140,14 +140,49 @@ impl CatalogBackedSnapshotProvider {
         descriptor.producer_view_version = producer_view_version;
 
         let prefix = descriptor.object_prefix.clone();
-        self.object_store
-            .upload_buffer(&format!("{prefix}segments"), &encode_segments(snapshot)?)?;
-        self.object_store
-            .upload_buffer(&format!("{prefix}metadata"), &encode_metadata(snapshot)?)?;
-        self.object_store.upload_buffer(
-            &format!("{prefix}task_manager"),
-            &encode_task_manager(&snapshot.tasks)?,
-        )?;
+        let metadata = encode_metadata(snapshot)?;
+        let segments = encode_segments(snapshot)?;
+        let task_manager = encode_task_manager(&snapshot.tasks)?;
+        let manifest = if snapshot.allocator_config.is_some() {
+            format!(
+                "{MANIFEST_PROTOCOL}|{MANIFEST_VERSION}|{}|{RUST_ALLOCATOR_CONFIG_EXTENSION}",
+                descriptor.snapshot_id
+            )
+        } else {
+            format!(
+                "{MANIFEST_PROTOCOL}|{MANIFEST_VERSION}|{}",
+                descriptor.snapshot_id
+            )
+        };
+        let core_payloads = [
+            ("metadata", format!("{prefix}metadata"), metadata.as_slice()),
+            ("segments", format!("{prefix}segments"), segments.as_slice()),
+            (
+                "task_manager",
+                format!("{prefix}task_manager"),
+                task_manager.as_slice(),
+            ),
+        ];
+        let mut upload_errors = Vec::new();
+        for (name, key, payload) in core_payloads {
+            if let Err(error) = self.object_store.upload_buffer(&key, payload) {
+                if self.snapshot_backup_dir.is_none() {
+                    return Err(error);
+                }
+                self.backup_failed_snapshot_payload(name, payload);
+                upload_errors.push(format!("{name}: {error}"));
+            }
+        }
+        if !upload_errors.is_empty() {
+            if let Err(error) = self
+                .object_store
+                .upload_string(&descriptor.manifest_key, &manifest)
+            {
+                self.backup_failed_snapshot_payload("manifest.txt", manifest.as_bytes());
+                upload_errors.push(format!("manifest.txt: {error}"));
+            }
+            return Err(HaError::Snapshot(upload_errors.join("\n")));
+        }
         self.object_store.upload_buffer(
             &format!("{prefix}{RUST_REPLICATION_TASKS_EXTENSION}"),
             &encode_replication_tasks_extension(&snapshot.replication_tasks)?,
@@ -170,21 +205,32 @@ impl CatalogBackedSnapshotProvider {
                 &encode_allocator_config_extension(config)?,
             )?;
         }
-        let manifest = if snapshot.allocator_config.is_some() {
-            format!(
-                "{MANIFEST_PROTOCOL}|{MANIFEST_VERSION}|{}|{RUST_ALLOCATOR_CONFIG_EXTENSION}",
-                descriptor.snapshot_id
-            )
-        } else {
-            format!(
-                "{MANIFEST_PROTOCOL}|{MANIFEST_VERSION}|{}",
-                descriptor.snapshot_id
-            )
-        };
-        self.object_store
-            .upload_string(&descriptor.manifest_key, &manifest)?;
+        if let Err(error) = self
+            .object_store
+            .upload_string(&descriptor.manifest_key, &manifest)
+        {
+            if self.snapshot_backup_dir.is_some() {
+                self.backup_failed_snapshot_payload("manifest.txt", manifest.as_bytes());
+            }
+            return Err(error);
+        }
         self.catalog_store.publish(&descriptor)?;
         Ok(descriptor)
+    }
+
+    fn backup_failed_snapshot_payload(&self, name: &str, payload: &[u8]) {
+        let Some(root) = &self.snapshot_backup_dir else {
+            return;
+        };
+        let backup_dir = root.join("mooncake_snapshot_save_backup");
+        if let Err(error) = std::fs::create_dir_all(&backup_dir) {
+            tracing::warn!(%error, path = %backup_dir.display(), "failed to create snapshot save backup directory");
+            return;
+        }
+        let path = backup_dir.join(name);
+        if let Err(error) = std::fs::write(&path, payload) {
+            tracing::warn!(%error, path = %path.display(), "failed to write snapshot save backup");
+        }
     }
 
     pub fn prune_snapshots(&self, retention_count: usize) -> Result<(), HaError> {
@@ -503,7 +549,7 @@ pub fn create_catalog_backed_snapshot_provider(
     catalog_connstring: Option<&str>,
 ) -> Result<CatalogBackedSnapshotProvider, HaError> {
     let cluster_id = cluster_id.into();
-    let restore_backup_dir = local_root.clone();
+    let snapshot_backup_dir = local_root.clone();
     let object_store: Arc<dyn SnapshotObjectStore> = match object_store_type {
         SnapshotObjectStoreType::Local => {
             let root = resolve_local_snapshot_root(
@@ -538,7 +584,7 @@ pub fn create_catalog_backed_snapshot_provider(
     };
     Ok(
         CatalogBackedSnapshotProvider::new(cluster_id, catalog_store, object_store)
-            .with_restore_backup_dir(restore_backup_dir),
+            .with_snapshot_backup_dir(snapshot_backup_dir),
     )
 }
 impl CatalogBackedSnapshotProvider {
@@ -701,7 +747,7 @@ impl CatalogBackedSnapshotProvider {
         segments: &[u8],
         task_manager: Option<&[u8]>,
     ) {
-        let Some(root) = &self.restore_backup_dir else {
+        let Some(root) = &self.snapshot_backup_dir else {
             return;
         };
         let backup_dir = root.join("mooncake_snapshot_restore_backup");

@@ -21,7 +21,7 @@ use mooncake_store_master::service::{
 use mooncake_store_master::storage_backend::LocalDiskSnapshotEntry;
 use rmpv::Value;
 use std::io::Cursor;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 use tempfile::tempdir;
 use uuid::Uuid;
@@ -61,6 +61,97 @@ fn empty_loaded_snapshot(snapshot_id: &str, snapshot_sequence_id: u64) -> Loaded
 struct DownloadFailureSnapshotObjectStore {
     inner: Arc<LocalFileSnapshotObjectStore>,
     failing_key: String,
+}
+
+struct UploadFailureSnapshotObjectStore {
+    attempted: Arc<Mutex<Vec<String>>>,
+}
+
+impl SnapshotObjectStore for UploadFailureSnapshotObjectStore {
+    fn upload_buffer(&self, key: &str, _: &[u8]) -> Result<(), HaError> {
+        self.attempted.lock().unwrap().push(key.to_string());
+        Err(HaError::Snapshot(format!("{key} upload failed")))
+    }
+
+    fn download_buffer(&self, _: &str) -> Result<Vec<u8>, HaError> {
+        panic!("upload-failure fixture must not read")
+    }
+
+    fn delete_objects_with_prefix(&self, _: &str) -> Result<(), HaError> {
+        panic!("upload-failure fixture must not delete")
+    }
+
+    fn list_objects_with_prefix(&self, _: &str) -> Result<Vec<String>, HaError> {
+        panic!("upload-failure fixture must not list")
+    }
+
+    fn is_not_found_error(&self, _: &str) -> bool {
+        false
+    }
+
+    fn connection_info(&self) -> String {
+        "fault://upload".into()
+    }
+}
+
+fn upload_failure_provider(attempted: Arc<Mutex<Vec<String>>>) -> CatalogBackedSnapshotProvider {
+    CatalogBackedSnapshotProvider::new(
+        "cluster-a",
+        Box::new(UnexpectedCatalogAccess),
+        Arc::new(UploadFailureSnapshotObjectStore { attempted }),
+    )
+}
+
+#[test]
+fn cpp_parity_snapshot_persist_without_backup_stops_on_metadata_failure() {
+    let attempted = Arc::new(Mutex::new(Vec::new()));
+    let provider = upload_failure_provider(attempted.clone());
+
+    let error = provider
+        .publish_loaded_snapshot(&empty_loaded_snapshot("20240701_failfast_000", 1), 2)
+        .unwrap_err();
+
+    let attempts = attempted.lock().unwrap().clone();
+    assert_eq!(attempts.len(), 1);
+    assert!(attempts[0].ends_with("/metadata"));
+    let message = error.to_string();
+    assert!(message.contains("metadata"));
+    assert!(!message.contains("segments"));
+    assert!(!message.contains("task_manager"));
+    assert!(!message.contains("manifest"));
+}
+
+#[test]
+fn cpp_parity_snapshot_persist_with_backup_collects_four_failures_and_payloads() {
+    let backup_root = tempdir().unwrap();
+    let attempted = Arc::new(Mutex::new(Vec::new()));
+    let provider = upload_failure_provider(attempted.clone())
+        .with_snapshot_backup_dir(Some(backup_root.path().to_path_buf()));
+
+    let error = provider
+        .publish_loaded_snapshot(&empty_loaded_snapshot("20240701_backup_all_000", 1), 2)
+        .unwrap_err();
+
+    let attempts = attempted.lock().unwrap().clone();
+    assert_eq!(attempts.len(), 4);
+    for (key, name) in attempts
+        .iter()
+        .zip(["metadata", "segments", "task_manager", "manifest.txt"])
+    {
+        assert!(key.ends_with(if name == "manifest.txt" {
+            "/manifest.txt"
+        } else {
+            name
+        }));
+        assert!(error.to_string().contains(name));
+        assert!(
+            backup_root
+                .path()
+                .join("mooncake_snapshot_save_backup")
+                .join(name)
+                .is_file()
+        );
+    }
 }
 
 impl SnapshotObjectStore for DownloadFailureSnapshotObjectStore {
