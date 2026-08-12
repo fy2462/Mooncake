@@ -77,6 +77,7 @@ pub struct CatalogBackedSnapshotProvider {
     catalog_store: Box<dyn SnapshotCatalogStore>,
     object_store: Arc<dyn SnapshotObjectStore>,
     snapshot_backup_dir: Option<PathBuf>,
+    retain_expired_objects: bool,
 }
 impl CatalogBackedSnapshotProvider {
     pub fn new(
@@ -89,7 +90,14 @@ impl CatalogBackedSnapshotProvider {
             catalog_store,
             object_store,
             snapshot_backup_dir: None,
+            retain_expired_objects: false,
         }
+    }
+
+    #[doc(hidden)]
+    pub fn with_expired_objects_retained(mut self, retain: bool) -> Self {
+        self.retain_expired_objects = retain;
+        self
     }
 
     pub fn with_snapshot_backup_dir(mut self, backup_dir: Option<PathBuf>) -> Self {
@@ -688,7 +696,11 @@ impl CatalogBackedSnapshotProvider {
         let metadata_payload = self
             .object_store
             .download_buffer(&format!("{prefix}metadata"))?;
-        let mut objects = decode_metadata(&metadata_payload, &decoded_segments)?;
+        let mut objects = decode_metadata(
+            &metadata_payload,
+            &decoded_segments,
+            self.retain_expired_objects,
+        )?;
         if let Some(entries) =
             load_local_disk_replica_identities_extension(self.object_store.as_ref(), &prefix)?
         {
@@ -1308,6 +1320,7 @@ fn decode_local_disk_segments(data: &[u8]) -> Result<Vec<LocalDiskSnapshotEntry>
 fn decode_metadata(
     data: &[u8],
     segments: &HashMap<Uuid, DecodedSegment>,
+    retain_expired_objects: bool,
 ) -> Result<Vec<(String, ObjectEntry)>, HaError> {
     let root = decode_value(data)?;
     let shards = value_map(map_field(&root, "shards")?, "metadata shards")?;
@@ -1357,7 +1370,14 @@ fn decode_metadata(
                 }
                 _ => return Err(snapshot_error("metadata item has invalid shape")),
             };
-            if let Some(entry) = decode_object(metadata, &tenant_id, &user_key, segments, now)? {
+            if let Some(entry) = decode_object(
+                metadata,
+                &tenant_id,
+                &user_key,
+                segments,
+                now,
+                retain_expired_objects,
+            )? {
                 let scoped_key = tenant_id.make_scoped_key(&user_key);
                 if !object_keys.insert(scoped_key.clone()) {
                     return Err(snapshot_error("duplicate object identity in metadata"));
@@ -1423,6 +1443,7 @@ fn decode_object(
     user_key: &str,
     segments: &HashMap<Uuid, DecodedSegment>,
     now: SystemTime,
+    retain_expired_objects: bool,
 ) -> Result<Option<ObjectEntry>, HaError> {
     let fields = value_array(value, "object metadata")?;
     if fields.len() < 7 {
@@ -1505,7 +1526,8 @@ fn decode_object(
     // elapsed. The current C++ cleanup omits this check; Rust intentionally
     // preserves the public hard-pin invariant instead of reproducing that
     // recovery-time data-loss bug.
-    if !hard_pinned
+    if !retain_expired_objects
+        && !hard_pinned
         && replicas
             .iter()
             .all(|replica| replica.status == ReplicaStatus::Complete)
@@ -1962,7 +1984,7 @@ mod tests {
         )]))
         .unwrap();
 
-        assert!(decode_metadata(&payload, &HashMap::new()).is_err());
+        assert!(decode_metadata(&payload, &HashMap::new(), false).is_err());
     }
 
     #[test]
@@ -1980,7 +2002,7 @@ mod tests {
         )]))
         .unwrap();
 
-        assert!(decode_metadata(&payload, &HashMap::new()).is_err());
+        assert!(decode_metadata(&payload, &HashMap::new(), false).is_err());
     }
 
     #[test]
@@ -1997,7 +2019,7 @@ mod tests {
         )]))
         .unwrap();
 
-        assert!(decode_metadata(&payload, &HashMap::new()).is_err());
+        assert!(decode_metadata(&payload, &HashMap::new(), false).is_err());
     }
 
     #[test]
@@ -2024,7 +2046,7 @@ mod tests {
             )]))
             .unwrap();
 
-            let objects = decode_metadata(&payload, &HashMap::new()).unwrap();
+            let objects = decode_metadata(&payload, &HashMap::new(), false).unwrap();
             assert_eq!(objects.len(), 1);
             assert_eq!(objects[0].1.replicas[0].status, expected_status);
         }

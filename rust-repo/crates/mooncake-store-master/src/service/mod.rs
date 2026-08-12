@@ -6615,10 +6615,13 @@ mod snapshot_restore_tests {
     #[tokio::test]
     async fn cpp_parity_snapshot_evict_object() {
         let root = tempfile::tempdir().unwrap();
-        let (provider, _object_store) = snapshot_codec_provider(&root);
+        let storage_root = tempfile::tempdir().unwrap();
+        let (provider, object_store) = snapshot_codec_provider(&root);
+        let provider = provider.with_expired_objects_retained(true);
         let source = MasterServiceImpl::with_runtime_config(MasterRuntimeConfig {
             lease_ttl: std::time::Duration::from_millis(2000),
-            eviction_interval: std::time::Duration::from_millis(5),
+            eviction_interval: std::time::Duration::from_secs(60),
+            storage_fs_dir: storage_root.path().to_string_lossy().into_owned(),
             ..Default::default()
         });
         let client_id = Uuid::new_v4();
@@ -6636,17 +6639,242 @@ mod snapshot_restore_tests {
         )
         .await
         .unwrap();
-        let mut success_puts = 0usize;
         for index in 0..16_434 {
             let key = format!("test_key{index}");
-            if snapshot_put_soft_pinned(&source, client_id, &key, 1024 * 15).await {
-                success_puts += 1;
-            } else {
-                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            let mut started = MasterService::put_start(
+                &source,
+                Request::new(proto::PutStartRequest {
+                    client_id: Some(uuid_to_proto(client_id)),
+                    key: key.clone(),
+                    slice_length: 1024 * 15,
+                    tenant_id: String::new(),
+                    config: Some(proto::ReplicateConfig {
+                        replica_num: 1,
+                        ..Default::default()
+                    }),
+                }),
+            )
+            .await;
+            if started.is_err() {
+                for mut object in source.state.objects.iter_mut() {
+                    object.lease_timeout = Some(SystemTime::UNIX_EPOCH);
+                }
+                assert_eq!(source.run_eviction_cycle_for_test(1).len(), 1);
+                started = MasterService::put_start(
+                    &source,
+                    Request::new(proto::PutStartRequest {
+                        client_id: Some(uuid_to_proto(client_id)),
+                        key: key.clone(),
+                        slice_length: 1024 * 15,
+                        tenant_id: String::new(),
+                        config: Some(proto::ReplicateConfig {
+                            replica_num: 1,
+                            ..Default::default()
+                        }),
+                    }),
+                )
+                .await;
+            }
+            let replicas = started.unwrap().into_inner().replicas;
+            assert_eq!(replicas.len(), 2);
+            for replica_type in [
+                proto::replica_descriptor::ReplicaType::Memory,
+                proto::replica_descriptor::ReplicaType::Disk,
+            ] {
+                MasterService::put_end(
+                    &source,
+                    Request::new(proto::PutEndRequest {
+                        client_id: Some(uuid_to_proto(client_id)),
+                        key: key.clone(),
+                        replica_type: replica_type as i32,
+                        tenant_id: String::new(),
+                    }),
+                )
+                .await
+                .unwrap();
             }
         }
-        assert!(success_puts > 16_384);
-        snapshot_roundtrip_any_state(&provider, &source, "20260806_090000_001").await;
+        let mut success_gets = 0usize;
+        for index in 0..16_434 {
+            if MasterService::get_replica_list(
+                &source,
+                Request::new(proto::GetReplicaListRequest {
+                    key: format!("test_key{index}"),
+                    tenant_id: String::new(),
+                }),
+            )
+            .await
+            .is_ok()
+            {
+                success_gets += 1;
+            }
+        }
+        assert_eq!(success_gets, 16_434);
+        for mut object in source.state.objects.iter_mut() {
+            object.lease_timeout = Some(SystemTime::UNIX_EPOCH);
+        }
+
+        let first = publish_service_snapshot(&provider, &source, "20260806_090000_001", 1);
+        let loaded = provider
+            .load_latest_snapshot(SNAPSHOT_CODEC_CLUSTER)
+            .unwrap()
+            .unwrap();
+        let first_loaded = loaded.clone();
+        let restored = MasterServiceImpl::default();
+        restore_loaded_snapshot(&restored, loaded).unwrap();
+        assert_eq!(restored.state.objects.len(), 16_434);
+        for source_object in source.state.objects.iter() {
+            let restored_object = restored.state.objects.get(source_object.key()).unwrap();
+            assert_eq!(restored_object.size, source_object.size);
+            assert_eq!(restored_object.client_id, source_object.client_id);
+            assert_eq!(restored_object.tenant_id, source_object.tenant_id);
+            assert_eq!(restored_object.user_key, source_object.user_key);
+            assert_eq!(restored_object.group_id, source_object.group_id);
+            assert_eq!(restored_object.hard_pinned, source_object.hard_pinned);
+            assert_eq!(restored_object.data_type, source_object.data_type);
+            assert_eq!(restored_object.lease_timeout, source_object.lease_timeout);
+            assert_eq!(
+                restored_object.soft_pin_timeout,
+                source_object.soft_pin_timeout
+            );
+            assert_eq!(
+                restored_object.quota_committed,
+                source_object.quota_committed
+            );
+            assert_eq!(
+                restored_object.committed_quota_charge_bytes,
+                source_object
+                    .replicas
+                    .iter()
+                    .filter(|replica| replica.replica_type == ReplicaType::Memory)
+                    .map(|replica| replica.size)
+                    .sum::<u64>()
+            );
+            assert_eq!(restored_object.replicas.len(), source_object.replicas.len());
+            for source_replica in &source_object.replicas {
+                let restored_replica = restored_object
+                    .replicas
+                    .iter()
+                    .find(|replica| replica.replica_type == source_replica.replica_type)
+                    .unwrap();
+                assert_eq!(restored_replica.segment_id, source_replica.segment_id);
+                assert_eq!(restored_replica.segment_name, source_replica.segment_name);
+                assert_eq!(restored_replica.offset, source_replica.offset);
+                assert_eq!(restored_replica.size, source_replica.size);
+                assert_eq!(restored_replica.status, source_replica.status);
+            }
+        }
+        let second = publish_service_snapshot(&provider, &restored, "20260806_090001_001", 1);
+        let second_loaded = provider
+            .load_latest_snapshot(SNAPSHOT_CODEC_CLUSTER)
+            .unwrap()
+            .unwrap();
+        let segment_probe = |snapshot: &LoadedSnapshot| {
+            let mut segments = snapshot
+                .segments
+                .iter()
+                .map(|entry| {
+                    (
+                        entry.segment.id,
+                        entry.segment.name.clone(),
+                        entry.segment.size,
+                        entry.segment.te_endpoint.clone(),
+                        entry.segment.protocol.clone(),
+                        entry.segment.host_id.clone(),
+                        entry.client_id,
+                        entry.status as i32,
+                    )
+                })
+                .collect::<Vec<_>>();
+            segments.sort_by_key(|entry| entry.0);
+            segments
+        };
+        assert_eq!(segment_probe(&second_loaded), segment_probe(&first_loaded));
+        assert_eq!(
+            second_loaded.nof_segments.len(),
+            first_loaded.nof_segments.len()
+        );
+        assert_eq!(second_loaded.tasks.len(), first_loaded.tasks.len());
+        assert_eq!(
+            second_loaded.replication_tasks.len(),
+            first_loaded.replication_tasks.len()
+        );
+        assert_eq!(
+            second_loaded.local_disk_segments.len(),
+            first_loaded.local_disk_segments.len()
+        );
+        assert_eq!(
+            second_loaded.graceful_unmounts.len(),
+            first_loaded.graceful_unmounts.len()
+        );
+        assert_eq!(
+            second_loaded.delayed_replica_releases.len(),
+            first_loaded.delayed_replica_releases.len()
+        );
+        assert_eq!(second_loaded.objects.len(), first_loaded.objects.len());
+        let mut first_objects = first_loaded.objects.into_iter().collect::<HashMap<_, _>>();
+        for (key, second_object) in second_loaded.objects {
+            let first_object = first_objects.remove(&key).unwrap();
+            assert_eq!(second_object.size, first_object.size);
+            assert_eq!(second_object.client_id, first_object.client_id);
+            assert_eq!(second_object.tenant_id, first_object.tenant_id);
+            assert_eq!(second_object.user_key, first_object.user_key);
+            assert_eq!(second_object.group_id, first_object.group_id);
+            assert_eq!(second_object.hard_pinned, first_object.hard_pinned);
+            assert_eq!(second_object.data_type, first_object.data_type);
+            assert_eq!(second_object.lease_timeout, first_object.lease_timeout);
+            assert_eq!(
+                second_object.soft_pin_timeout,
+                first_object.soft_pin_timeout
+            );
+            assert_eq!(second_object.replicas.len(), first_object.replicas.len());
+            for first_replica in first_object.replicas {
+                let second_replica = second_object
+                    .replicas
+                    .iter()
+                    .find(|replica| replica.replica_type == first_replica.replica_type)
+                    .unwrap();
+                assert_eq!(second_replica.segment_id, first_replica.segment_id);
+                assert_eq!(second_replica.segment_name, first_replica.segment_name);
+                assert_eq!(second_replica.offset, first_replica.offset);
+                assert_eq!(second_replica.size, first_replica.size);
+                assert_eq!(second_replica.status, first_replica.status);
+                assert_eq!(
+                    second_replica.local_disk_storage_id,
+                    first_replica.local_disk_storage_id
+                );
+                assert_eq!(
+                    second_replica.local_disk_generation_id,
+                    first_replica.local_disk_generation_id
+                );
+            }
+        }
+        assert!(first_objects.is_empty());
+        let snapshot_blobs = |prefix: &str| {
+            let mut blobs = object_store
+                .list_objects_with_prefix(prefix)
+                .unwrap()
+                .into_iter()
+                .filter(|key| {
+                    !key.ends_with("descriptor.txt")
+                        && !key.ends_with("manifest.txt")
+                        && !key.ends_with("metadata")
+                        && !key.ends_with("segments")
+                })
+                .map(|key| {
+                    let suffix = key.strip_prefix(prefix).unwrap().to_string();
+                    let bytes = object_store.download_buffer(&key).unwrap();
+                    (suffix, bytes)
+                })
+                .collect::<Vec<_>>();
+            blobs.sort_by(|left, right| left.0.cmp(&right.0));
+            blobs
+        };
+        assert_eq!(
+            snapshot_blobs(&second.object_prefix),
+            snapshot_blobs(&first.object_prefix),
+            "fresh restore's second state payload must be byte-identical"
+        );
     }
 
     #[tokio::test]

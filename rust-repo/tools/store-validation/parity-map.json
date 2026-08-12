@@ -6493,7 +6493,7 @@
    "status": "covered"
   },
   {
-   "behavior": "While filling a roughly 240-MB LocalDisk/SSD segment, more than 16K Memory-plus-Disk puts complete and more than 16K replica-list lookups succeed; both counts are asserted before a final lease-TTL sleep. After that sleep, teardown snapshots the current state and a fresh service must match its descriptors, segment/accounting, LocalDisk state/tasks, and second-save state.",
+   "behavior": "While filling a roughly 240-MB LocalDisk/SSD segment, more than 16K Memory-plus-Disk puts complete and more than 16K replica-list lookups succeed; both counts are asserted before final lease expiry. After expiry, the current state is snapshotted, restored into a fresh service, and saved again with persistent object/replica fields and non-runtime snapshot payloads preserved.",
    "boundary": [
     "master",
     "snapshot",
@@ -6508,13 +6508,18 @@
     "file": "ha/snapshot/master_service_ssd_test_for_snapshot.cpp",
     "test": "MasterServiceSSDSnapshotTest.EvictObject"
    },
-   "reason": "test_global_disk_keeps_object_readable_after_memory_capacity_eviction is a one-object in-process eviction test. It does not reproduce the target's more-than-16K pre-sleep admission and lookup counts or snapshot the state reached after the final TTL sleep for fresh-service restore and second-save comparison.",
+   "reason": "cpp_parity_snapshot_evict_object uses the C++ 240-MiB segment, 15-KiB objects, and 16,434 attempts; it deterministically expires leases when capacity requires eviction, completes every admitted Memory and Disk replica, proves all 16,434 keys remain readable from Disk, then models the final TTL expiry before publishing. The provider's test-only retain-expired option mirrors the C++ fixture's SKIP_CLEANUP restore, and the fresh service is checked object-by-object for durable metadata and replica identity/ranges/status before a second publish; runtime-only Memory handles and segment usage are rebuilt per Rust term and are not claimed byte-identical.",
    "review": {
     "oracle": "mooncake-store/tests/ha/snapshot/master_service_ssd_test_for_snapshot.cpp EvictObject assertions before the final TTL sleep, followed by MasterServiceSnapshotTestBase::TearDown/TestSnapshotAndRestore",
     "reviewed": true
    },
-   "rust": [],
-   "status": "missing"
+   "rust": [
+    {
+     "file": "mooncake-store-master/src/service/mod.rs",
+     "test": "cpp_parity_snapshot_evict_object"
+    }
+   ],
+   "status": "covered"
   },
   {
    "behavior": "For each discarded replica type, PutStart yields two Processing replicas, its sibling completes, a post-discard-timeout PutStart returns OBJECT_ALREADY_EXISTS, and after release timeout a late PutEnd succeeds while lookup shows exactly the expected sibling. Each permutation then waits for the key to expire; teardown snapshots and fresh-restores the resulting post-expiry state and compares its second save.",
