@@ -9629,13 +9629,14 @@
     "file": "ha/leadership/high_availability_test.cpp",
     "test": "HighAvailabilityTest.EtcdStoreClientResetKeepsBasicOperationsWorking"
    },
-   "reason": "Rust clones or constructs etcd clients directly; it has no production reset API or test defining replacement-client put/get and lease semantics.",
+   "reason": "This oracle targets EtcdHelper's process-global Store client and ResetEtcdStoreClient replacement API. Rust has no global etcd client to reset: each coordinator or oplog store owns an explicit cloneable etcd_client::Client, and callers replace those owners rather than mutating shared global transport state. Ordinary live-client KV and lease behavior remains covered separately.",
    "review": {
+    "na_category": "absent-rust-product-boundary",
     "oracle": "high_availability_test.cpp EtcdStoreClientResetKeepsBasicOperationsWorking and EtcdHelper::ResetEtcdStoreClient",
     "reviewed": true
    },
    "rust": [],
-   "status": "missing"
+   "status": "not-applicable"
   },
   {
    "behavior": "Resetting the Store client after keepalive readiness makes the old keepalive finish non-OK within five seconds, after which the replacement client grants and revokes a lease.",
@@ -9650,13 +9651,14 @@
     "file": "ha/leadership/high_availability_test.cpp",
     "test": "HighAvailabilityTest.EtcdStoreClientResetStopsOldKeepAlive"
    },
-   "reason": "Rust has no client-reset or replacement lifecycle and no discoverable test proving old etcd keepalive task termination before a replacement client becomes usable.",
+   "reason": "The forced termination is a side effect of resetting C++ EtcdHelper's process-global client and its keepalive registry. Rust has no such reset or registry: leadership handles explicitly own and cancel their keepalive tasks, while a replacement coordinator/client has independent ownership. Explicit cancellation and genuine keepalive-loss behavior are separate Rust boundaries.",
    "review": {
+    "na_category": "absent-rust-product-boundary",
     "oracle": "high_availability_test.cpp EtcdStoreClientResetStopsOldKeepAlive and EtcdHelper keepalive/reset calls",
     "reviewed": true
    },
    "rust": [],
-   "status": "missing"
+   "status": "not-applicable"
   },
   {
    "behavior": "A prefix watch receives an event, client reset produces exactly one broken notification and stops the old watcher, a newly registered watcher receives a later event, and explicit cleanup stops it.",
@@ -9671,7 +9673,7 @@
     "file": "ha/leadership/high_availability_test.cpp",
     "test": "HighAvailabilityTest.EtcdStoreClientResetTriggersPrefixWatchBrokenAndReconnect"
    },
-   "reason": "Rust oplog notifier source contains watch, reconnect, and health logic, but no discoverable real-etcd test injects a broken stream/client reset, asserts one broken transition and old-watch termination, then proves reconnection delivery.",
+   "reason": "C++ uses its global client reset as the fault injector, but the observable contract also applies to Rust's production EtcdOpLogChangeNotifier: an active prefix watch must report the transport failure, retire or reconnect the broken stream, and deliver a later event after recovery. Rust implements health downgrade and reconnect logic, but no live transport-failure test proves the full error-to-recovery delivery loop.",
    "review": {
     "oracle": "high_availability_test.cpp EtcdStoreClientResetTriggersPrefixWatchBrokenAndReconnect and EtcdHelper prefix-watch lifecycle",
     "reviewed": true
