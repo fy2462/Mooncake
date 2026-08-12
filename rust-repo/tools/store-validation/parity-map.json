@@ -10089,13 +10089,14 @@
     "file": "ha/oplog/etcd_oplog_store_test.cpp",
     "test": "EtcdOpLogStoreTest.TestBatchUpdate_FailurePlaceholder"
    },
-   "reason": "The skipped C++ placeholder remains an in-scope required fault-injection contract; Rust's stalled gRPC transaction test is a timeout/poison oracle, not a batch/latest persistence-failure wrapper test.",
+   "reason": "The fixture executes only GTEST_SKIP and contains no fault injection, batch update, or assertion, so it is a future test note rather than an executable C++ correctness oracle. Rust's independent timeout/poison coverage is not attributed to this placeholder.",
    "review": {
+    "na_category": "no-executable-cpp-oracle",
     "oracle": "etcd_oplog_store_test.cpp TestBatchUpdate_FailurePlaceholder and EtcdOpLogStore::DoBatchUpdate; Rust main.rs stalled_leader_oplog_transaction_is_bounded_poisoned_and_fences_service",
     "reviewed": true
    },
    "rust": [],
-   "status": "missing"
+   "status": "not-applicable"
   },
   {
    "behavior": "Cleaning before sequence 3 removes sequences 1 and 2 while retaining persisted sequences 3 and 5.",
@@ -12619,13 +12620,14 @@
     "file": "ha/oplog/oplog_manager_test.cpp",
     "test": "OpLogManagerTest.TestWriteToEtcd_Retry"
    },
-   "reason": "No discoverable Rust live or fake-CAS test proves retry after failed/uncertain ordered-etcd write preserves ordering and one logical entry; backend poison-on-flush-error requires an explicit contract.",
+   "reason": "The fixture executes only GTEST_SKIP and explicitly delegates retry/idempotency semantics to EtcdOpLogStore tests; it performs no write, retry, or assertion. Executed backend retry or failure rows remain separately applicable.",
    "review": {
+    "na_category": "no-executable-cpp-oracle",
     "oracle": "oplog_manager_test.cpp TestWriteToEtcd_Retry placeholder and Rust oplog_etcd.rs flush poison path",
     "reviewed": true
    },
    "rust": [],
-   "status": "missing"
+   "status": "not-applicable"
   },
   {
    "behavior": "The skipped placeholder reserves idempotent duplicate-retry behavior for ordered-etcd writes.",
@@ -12641,13 +12643,14 @@
     "file": "ha/oplog/oplog_manager_test.cpp",
     "test": "OpLogManagerTest.TestIdempotentWrite"
    },
-   "reason": "No discoverable Rust live or fake-CAS test proves caller-facing duplicate retry idempotency; source nonexistence compares alone are not that oracle.",
+   "reason": "The fixture executes only GTEST_SKIP and explicitly delegates idempotent writes to EtcdOpLogStore tests; it has no manager operation or assertion. The executed EtcdOpLogStore.TestWriteOpLog_Idempotent row remains separately applicable and missing.",
    "review": {
+    "na_category": "no-executable-cpp-oracle",
     "oracle": "oplog_manager_test.cpp TestIdempotentWrite placeholder and Rust oplog_etcd.rs transaction compares",
     "reviewed": true
    },
    "rust": [],
-   "status": "missing"
+   "status": "not-applicable"
   },
   {
    "behavior": "After starting at UINT64_MAX-2, three appends wrap from UINT64_MAX to zero and zero is newer than UINT64_MAX.",
