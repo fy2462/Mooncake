@@ -31733,13 +31733,18 @@
     "file": "master_service_tenant_quota_test.cpp",
     "test": "MasterServiceTenantQuotaTest.ConnectorPolicyReloadKeepsLocalDiskOnlyOrphanVisible"
    },
-   "reason": "Production prerequisite: complete registered unsolicited disk-only creation after ordinary MountSegment without a Rust LocalDisk session, then apply policy replacement through the production etcd leadership-term barrier. Add cpp_parity_etcd_reload_preserves_classic_disk_only_orphan_until_cleanup to mooncake-store-master/tests/test_tenant_quota_etcd_live.rs; provision isolated real etcd and a unique cluster namespace, persist tenant-a/b policies, call MountSegment only, create cold/128 for tenant-b through NotifyOffloadSuccess, persist a replacement containing only tenant-a, and advance the current leadership term through prepare_tenant_quota_leadership_term. Assert the exact five-field orphan tuple, force Remove cold successfully, assert tenant-b snapshot is None, and delete the namespace; do not mount LocalDisk or substitute file/Redis/Kubernetes serving.",
+   "reason": "Rust cpp_parity_etcd_reload_preserves_classic_disk_only_orphan_until_cleanup uses isolated real etcd and a unique cluster namespace, persists tenant-a/b policies, mounts only an ordinary Memory segment, creates cold/128 through the classic unsolicited NotifyOffloadSuccess path, then persists tenant-a only and applies it through the production leadership-term barrier. It asserts the exact orphan tuple, force-removes cold, and proves the accounting-only tenant row disappears. The production fix registers newly created classic disk-only metadata in the quota ledger and prunes the final lazy orphan on removal.",
    "review": {
     "oracle": "mooncake-store/tests/master_service_tenant_quota_test.cpp:382-421, ApplyTenantQuotaPolicies/RebuildTenantQuotaUsageFromMetadata, and Rust etcd policy term barrier/session validation",
     "reviewed": true
    },
-   "rust": [],
-   "status": "missing"
+   "rust": [
+    {
+     "file": "mooncake-store-master/tests/test_tenant_quota_etcd_live.rs",
+     "test": "cpp_parity_etcd_reload_preserves_classic_disk_only_orphan_until_cleanup"
+    }
+   ],
+   "status": "covered"
   },
   {
    "behavior": "An admitted offload task may complete after its tenant policy is removed: NotifyOffloadSuccess succeeds and the orphan object gains a LocalDisk replica.",
@@ -31784,13 +31789,18 @@
     "file": "master_service_tenant_quota_test.cpp",
     "test": "MasterServiceTenantQuotaTest.NotifyOffloadSuccessRejectsOrphanObjectWithoutOffloadTask"
    },
-   "reason": "Production prerequisite: allow the classic NotifyOffloadSuccess path to reach tenant validation without a Rust LocalDisk session; the existing Rust orphan rejection test mounts LocalDisk and therefore masks the current FailedPrecondition-first divergence. Add cpp_parity_etcd_removed_orphan_without_task_or_disk_session_rejects_offload to mooncake-store-master/tests/test_tenant_quota_etcd_live.rs; provision isolated real etcd with tenant-a/b, call MountSegment only, complete warming/128 in memory for tenant-b without admitting an offload task, persist a policy containing only tenant-a, advance the service leadership term through prepare_tenant_quota_leadership_term and assert tenant-b is non-explicit, then call the single-item NotifyOffloadSuccess service entry without mounting LocalDisk and assert Code::ResourceExhausted with tenant not registered. The C++ row has no post-notification object-state assertion.",
+   "reason": "Rust cpp_parity_etcd_removed_orphan_without_task_or_disk_session_rejects_offload uses isolated real etcd with tenant-a/b, mounts only an ordinary Memory segment, completes warming/128 in memory, removes tenant-b through the production leadership-term policy barrier, and proves the resulting orphan is non-explicit. A single classic NotifyOffloadSuccess without a LocalDisk session or admitted task then fails exactly Code::ResourceExhausted with tenant not registered.",
    "review": {
     "oracle": "mooncake-store/tests/master_service_tenant_quota_test.cpp:465-497 and Rust NotifyOffloadSuccess session-before-tenant validation",
     "reviewed": true
    },
-   "rust": [],
-   "status": "missing"
+   "rust": [
+    {
+     "file": "mooncake-store-master/tests/test_tenant_quota_etcd_live.rs",
+     "test": "cpp_parity_etcd_removed_orphan_without_task_or_disk_session_rejects_offload"
+    }
+   ],
+   "status": "covered"
   },
   {
    "behavior": "The first NotifyOffloadSuccess for cold/128 charges client A's LocalDisk usage exactly 128 and leaves client B at 0; repeating the same object from client B succeeds without changing either counter.",
@@ -32101,13 +32111,18 @@
     "file": "master_service_tenant_quota_test.cpp",
     "test": "MasterServiceTenantQuotaTest.ConnectorPolicyReloadCreatesOrphanStateAndAllowsCleanup"
    },
-   "reason": "Add cpp_parity_etcd_reload_preserves_readable_memory_orphan_and_rejects_new_writes to mooncake-store-master/tests/test_tenant_quota_etcd_live.rs; provision isolated real etcd endpoints and a unique cluster namespace, persist tenant-a and tenant-b policies, mount memory and complete orphan-key/100 for tenant-b, persist a replacement containing only tenant-a, and advance the current leadership term through prepare_tenant_quota_leadership_term. Assert tenant-b has_explicit_policy=false, requested_quota_bytes=0, effective_quota_bytes=0, and over_quota=true; assert GetReplicaList orphan-key succeeds; assert PutStart new-key/1 returns Code::ResourceExhausted with tenant not registered; then force Remove orphan-key successfully and clean the etcd namespace. No file/Redis/Kubernetes serving path substitutes for this production reload lifecycle.",
+   "reason": "Rust cpp_parity_etcd_reload_preserves_readable_memory_orphan_and_rejects_new_writes uses isolated real etcd, persists tenant-a/b, mounts Memory and completes orphan-key/100 for tenant-b, then persists tenant-a only and applies it through prepare_tenant_quota_leadership_term. It asserts explicit policy false, requested/effective quota zero and over_quota true, proves GetReplicaList remains readable, rejects new-key/1 exactly as tenant not registered, and force-removes the orphan.",
    "review": {
     "oracle": "mooncake-store/tests/master_service_tenant_quota_test.cpp:866-905, ApplyTenantQuotaPolicies/RebuildTenantQuotaUsageFromMetadata, and Rust etcd policy term barrier",
     "reviewed": true
    },
-   "rust": [],
-   "status": "missing"
+   "rust": [
+    {
+     "file": "mooncake-store-master/tests/test_tenant_quota_etcd_live.rs",
+     "test": "cpp_parity_etcd_reload_preserves_readable_memory_orphan_and_rejects_new_writes"
+    }
+   ],
+   "status": "covered"
   },
   {
    "behavior": "With a configured global filesystem and one mounted Memory segment, PutStart for a 1,024-byte object returns exactly two replicas, one Memory and one global Disk; GetReplicaList before completion fails REPLICA_IS_NOT_READY; after successful Memory and Disk PutEnd calls, GetReplicaList returns exactly two COMPLETE replicas.",

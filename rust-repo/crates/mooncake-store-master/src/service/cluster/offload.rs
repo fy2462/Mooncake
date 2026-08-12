@@ -535,9 +535,11 @@ impl MasterServiceImpl {
                     entry.persisted_client_id = Some(client_id);
                     entry.recovery_complete = true;
                 }
+                let mut created_object = false;
                 let mut object = match self.state.objects.get_mut(key) {
                     Some(object) => object,
                     None => {
+                        created_object = true;
                         let user_key = TenantId::parse_scoped_key(key)
                             .map(|(_, user_key)| user_key)
                             .unwrap_or_else(|_| key.clone());
@@ -593,6 +595,9 @@ impl MasterServiceImpl {
                     sync_cache_total_accounting(&mut object);
                 }
                 drop(object);
+                if created_object {
+                    self.register_tenant_metadata_object(tenant_id);
+                }
                 self.persist_object_image_or_remove(key, "classic_unsolicited_offload")?;
                 continue;
             }

@@ -321,19 +321,25 @@ impl TenantQuotaTable {
         tenant_id: &TenantId,
         committed_bytes: u64,
     ) -> Result<(), TenantQuotaError> {
-        let state = self.get_or_create_state(tenant_id);
-        if state.used_bytes < committed_bytes
-            || (committed_bytes != 0 && state.committed_count == 0)
-            || state.metadata_object_count == 0
-        {
-            return Err(TenantQuotaError::AccountingMismatch);
+        let remove_lazy_orphan = {
+            let state = self.get_or_create_state(tenant_id);
+            if state.used_bytes < committed_bytes
+                || (committed_bytes != 0 && state.committed_count == 0)
+                || state.metadata_object_count == 0
+            {
+                return Err(TenantQuotaError::AccountingMismatch);
+            }
+            state.used_bytes -= committed_bytes;
+            if committed_bytes != 0 {
+                state.committed_count -= 1;
+            }
+            state.metadata_object_count -= 1;
+            refresh_over_quota(state);
+            is_lazy_empty(state)
+        };
+        if remove_lazy_orphan {
+            self.tenants.remove(tenant_id);
         }
-        state.used_bytes -= committed_bytes;
-        if committed_bytes != 0 {
-            state.committed_count -= 1;
-        }
-        state.metadata_object_count -= 1;
-        refresh_over_quota(state);
         Ok(())
     }
 
