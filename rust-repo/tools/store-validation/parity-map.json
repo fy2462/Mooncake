@@ -17037,13 +17037,18 @@
     "file": "storage_backend_test.cpp",
     "test": "StorageBackendTest.BucketScan"
    },
-   "reason": "Partial evidence only: BucketStorageBackend::scan_records and bucket_packs_keys_and_recovers_generation_inventory return recovered storage keys with exact value sizes and generations, but Rust exposes no paginated scan result. Add cpp_parity_storage_backend_test_cpp_storagebackendtest_bucketscan_2da9f8ef at the Rust bucket replacement boundary; preserve multi-bucket inventory/size results and define/test Rust-appropriate continuation, limit, exhaustion, beyond-end, and one-bucket-over-limit outcomes without exposing private numeric bucket IDs.",
+   "reason": "Rust bucket.rs:cpp_parity_storage_backend_test_cpp_storagebackendtest_bucketscan_2da9f8ef writes 100 exact records into ten production buckets, then exercises the opaque-cursor scan boundary with 10-key and 45-key limits. It proves complete-bucket pages, non-overlapping continuation, exact key/value-size inventory through exhaustion, an empty beyond-end page, and an atomic InvalidParams result when one ten-key bucket exceeds an eight-key limit without exposing durable numeric bucket IDs.",
    "review": {
     "oracle": "mooncake-store/tests/storage_backend_test.cpp:215-303, BucketStorageBackend::BucketScan in mooncake-store/src/storage_backend.cpp:2286-2312, and Rust BucketStorageBackend::scan_records/bucket_packs_keys_and_recovers_generation_inventory",
     "reviewed": true
    },
-   "rust": [],
-   "status": "missing"
+   "rust": [
+    {
+     "file": "mooncake-store-client/src/local_storage_backend/bucket.rs",
+     "test": "cpp_parity_storage_backend_test_cpp_storagebackendtest_bucketscan_2da9f8ef"
+    }
+   ],
+   "status": "covered"
   },
   {
    "behavior": "ID 100 then 101/102.",

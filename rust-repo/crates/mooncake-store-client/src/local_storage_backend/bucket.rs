@@ -90,6 +90,13 @@ struct BucketRecord {
     generation_id: Uuid,
 }
 
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) struct BucketScanPage {
+    pub(crate) records: Vec<LocalStorageRecordMetadata>,
+    pub(crate) bucket_count: usize,
+    pub(crate) next_cursor: Option<String>,
+}
+
 #[derive(Clone, Debug)]
 struct BucketMeta {
     logical_size: u64,
@@ -1237,6 +1244,64 @@ impl BucketStorageBackend {
         records.sort_by(|left, right| left.storage_key.cmp(&right.storage_key));
         Ok(records)
     }
+
+    pub(crate) fn scan_bucket_page(
+        &self,
+        cursor: Option<&str>,
+        key_limit: usize,
+    ) -> StoreResult<BucketScanPage> {
+        self.ensure_initialized()?;
+        if key_limit == 0 {
+            return Err(StoreError::InvalidParams(
+                "bucket scan key limit must be positive".to_string(),
+            ));
+        }
+        let start_bucket_id = match cursor {
+            None => 0,
+            Some(cursor) => cursor
+                .strip_prefix("v1:")
+                .ok_or_else(|| StoreError::InvalidParams("invalid bucket scan cursor".to_string()))?
+                .parse::<u64>()
+                .map_err(|_| StoreError::InvalidParams("invalid bucket scan cursor".to_string()))?,
+        };
+        let state = self.state.lock();
+        let mut records = Vec::new();
+        let mut bucket_count = 0usize;
+        let mut next_cursor = None;
+        for (bucket_id, bucket) in state.buckets.range(start_bucket_id..) {
+            let mut bucket_records = state
+                .records
+                .iter()
+                .filter(|(key, record)| {
+                    record.bucket_id == *bucket_id
+                        && !state.accepted_tombstones.contains_key(key.as_str())
+                })
+                .map(|(key, record)| LocalStorageRecordMetadata {
+                    storage_key: key.clone(),
+                    value_size: record.value_size,
+                    generation_id: record.generation_id,
+                })
+                .collect::<Vec<_>>();
+            bucket_records.sort_by(|left, right| left.storage_key.cmp(&right.storage_key));
+            if bucket_records.len() > key_limit {
+                return Err(StoreError::InvalidParams(format!(
+                    "bucket key count {} exceeds scan limit {key_limit}",
+                    bucket_records.len()
+                )));
+            }
+            if records.len().saturating_add(bucket_records.len()) > key_limit {
+                next_cursor = Some(format!("v1:{bucket_id}"));
+                break;
+            }
+            records.extend(bucket_records);
+            bucket_count += usize::from(bucket.key_count > 0);
+        }
+        Ok(BucketScanPage {
+            records,
+            bucket_count,
+            next_cursor,
+        })
+    }
 }
 
 fn bucket_reservation_name(bucket_id: u64) -> String {
@@ -1311,6 +1376,79 @@ mod tests {
 
     fn one_byte_tasks(count: usize) -> HashMap<String, u64> {
         (0..count).map(|i| (format!("test{i}"), 1)).collect()
+    }
+
+    #[test]
+    fn cpp_parity_storage_backend_test_cpp_storagebackendtest_bucketscan_2da9f8ef() {
+        let root = TempDir::new().unwrap();
+        let mut config = config(&root);
+        config.bucket_keys_limit = 10;
+        config.bucket_size_limit = 16 * 1024;
+        config.quota_bytes = 256 * 1024;
+        let backend = BucketStorageBackend::new(config);
+        let mut expected = BTreeMap::new();
+        for index in 0..100 {
+            let key = format!("test-key-{index:03}");
+            let value = vec![b'A' + (index % 26) as u8; 20 + index];
+            write(&backend, &key, &value, Uuid::new_v4());
+            expected.insert(key, value.len() as u64);
+        }
+
+        let first = backend.scan_bucket_page(None, 10).unwrap();
+        assert_eq!(first.records.len(), 10);
+        assert_eq!(first.bucket_count, 1);
+        let first_cursor = first.next_cursor.clone().unwrap();
+        for record in &first.records {
+            assert_eq!(record.value_size, expected[&record.storage_key]);
+        }
+
+        let four = backend.scan_bucket_page(None, 45).unwrap();
+        assert_eq!(four.records.len(), 40);
+        assert_eq!(four.bucket_count, 4);
+        let fifth_cursor = four.next_cursor.clone().unwrap();
+        let next_four = backend.scan_bucket_page(Some(&fifth_cursor), 45).unwrap();
+        assert_eq!(next_four.records.len(), 40);
+        assert_eq!(next_four.bucket_count, 4);
+        assert!(four.records.iter().all(|left| {
+            next_four
+                .records
+                .iter()
+                .all(|right| left.storage_key != right.storage_key)
+        }));
+        let ninth_cursor = next_four.next_cursor.clone().unwrap();
+        let final_two = backend.scan_bucket_page(Some(&ninth_cursor), 45).unwrap();
+        assert_eq!(final_two.records.len(), 20);
+        assert_eq!(final_two.bucket_count, 2);
+        assert!(final_two.next_cursor.is_none());
+
+        let mut cursor = Some(first_cursor);
+        let mut seen = first.records;
+        while let Some(current) = cursor {
+            let page = backend.scan_bucket_page(Some(&current), 10).unwrap();
+            seen.extend(page.records);
+            cursor = page.next_cursor;
+        }
+        let mut actual = BTreeMap::new();
+        for record in seen {
+            assert!(
+                actual
+                    .insert(record.storage_key, record.value_size)
+                    .is_none(),
+                "bucket scan returned a duplicate key"
+            );
+        }
+        assert_eq!(actual, expected);
+
+        let beyond = backend
+            .scan_bucket_page(Some("v1:18446744073709551615"), 45)
+            .unwrap();
+        assert!(beyond.records.is_empty());
+        assert_eq!(beyond.bucket_count, 0);
+        assert!(beyond.next_cursor.is_none());
+        assert!(matches!(
+            backend.scan_bucket_page(None, 8),
+            Err(StoreError::InvalidParams(message)) if message.contains("bucket key count")
+        ));
     }
 
     #[test]
