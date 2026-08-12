@@ -1233,6 +1233,43 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_admin_http_metrics_standby_without_service() {
+        let state = AdminRuntimeState::new(
+            MasterRuntimeState::Standby,
+            Some(MasterView {
+                leader_address: "127.0.0.1:19000".to_string(),
+                view_version: 7,
+            }),
+            false,
+        );
+        let router = admin_router(state);
+
+        let (role_status, role_body) = get_router(&router, "/role").await;
+        assert_eq!(role_status, StatusCode::OK);
+        assert_eq!(role_body, "standby");
+
+        let (ha_status, ha_body) = get_router(&router, "/ha_status").await;
+        assert_eq!(ha_status, StatusCode::OK);
+        assert_eq!(ha_body, "standby");
+
+        let (leader_status, leader_body) = get_router(&router, "/leader").await;
+        let leader_body: Value = serde_json::from_str(&leader_body).unwrap();
+        assert_eq!(leader_status, StatusCode::OK);
+        assert_eq!(leader_body["present"], true);
+        assert_eq!(leader_body["leader_address"], "127.0.0.1:19000");
+        assert_eq!(leader_body["view_version"], 7);
+
+        for path in ["/get_all_segments", "/get_segments_detail"] {
+            let (status, body) = get_router(&router, path).await;
+            assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "path={path}");
+            assert!(
+                body.contains("service plane is not active"),
+                "path={path}, body={body}"
+            );
+        }
+    }
+
+    #[tokio::test]
     async fn test_admin_http_leader_clear_transition() {
         let state = runtime_state(MasterRuntimeState::Standby);
         let router = admin_router(state.clone());
@@ -1435,6 +1472,37 @@ mod tests {
         assert_eq!(batch_status, StatusCode::OK);
         assert_eq!(batch_body["data"]["key_one"]["ok"], true);
         assert_eq!(batch_body["data"]["key_two"]["ok"], true);
+    }
+
+    #[tokio::test]
+    async fn test_admin_http_metrics_service_endpoint_shapes() {
+        let segment_name = "admin_test_segment";
+        let router = router_with_memory_segment(segment_name).await;
+
+        let (segments_status, segments_body) = get_router(&router, "/get_all_segments").await;
+        assert_eq!(segments_status, StatusCode::OK);
+        assert!(segments_body.contains(segment_name));
+
+        let (query_status, query_body) =
+            get_router(&router, &format!("/query_segment?segment={segment_name}")).await;
+        assert_eq!(query_status, StatusCode::OK);
+        assert!(query_body.contains(segment_name));
+        assert!(query_body.contains("Capacity(bytes)"));
+
+        let (detail_status, detail_body) = get_router(&router, "/get_segments_detail").await;
+        assert_eq!(detail_status, StatusCode::OK);
+        for field in [
+            "\"total_segments\"",
+            "\"segments\"",
+            "\"allocator_used_bytes\"",
+            "\"allocator_capacity_bytes\"",
+        ] {
+            assert!(
+                detail_body.contains(field),
+                "missing {field}: {detail_body}"
+            );
+        }
+        assert!(detail_body.contains(segment_name));
     }
 
     #[tokio::test]

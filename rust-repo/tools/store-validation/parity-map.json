@@ -33463,13 +33463,18 @@
     "file": "master_metrics_test.cpp",
     "test": "MasterMetricsTest.AdminServerExposesStandbyStateWithoutService"
    },
-   "reason": "Production prerequisite: make admin_router expose the asserted no-service routes and map an absent delegate to a 503 body containing `service plane is not active` in mooncake-store-master/src/admin_http.rs. Add test_admin_http_metrics_standby_without_service to that file; construct the established etcd-derived standby runtime state with observed leader 127.0.0.1:19000/view 7 (no Redis or Kubernetes election), request all five paths, and assert the exact 200 bodies/leader fields plus that both 503 bodies contain `service plane is not active`.",
+   "reason": "The executable production-router test constructs standby runtime state with no service delegate and observed leader 127.0.0.1:19000/view 7, then exactly verifies all five C++ requests: standby role/status, the present leader fields, and both 503 service-plane error bodies.",
    "review": {
     "oracle": "mooncake-store/tests/master_metrics_test.cpp:405-440 and mooncake-store/src/master_admin_service.cpp",
     "reviewed": true
    },
-   "rust": [],
-   "status": "missing"
+   "rust": [
+    {
+     "file": "mooncake-store-master/src/admin_http.rs",
+     "test": "test_admin_http_metrics_standby_without_service"
+    }
+   ],
+   "status": "covered"
   },
   {
    "behavior": "With a serving service delegate after mounting an 8-MiB segment, /get_all_segments, /query_segment, and /get_segments_detail return 200 and contain the exact C++ segment and field labels Capacity(bytes), total_segments, segments, allocator_used_bytes, and allocator_capacity_bytes.",
@@ -33484,13 +33489,18 @@
     "file": "master_metrics_test.cpp",
     "test": "MasterMetricsTest.AdminServerRoutesServiceEndpointsWhenAvailable"
    },
-   "reason": "Production prerequisite: implement the missing /get_all_segments and /query_segment admin routes and preserve the asserted C++ response labels in mooncake-store-master/src/admin_http.rs. Add test_admin_http_metrics_service_endpoint_shapes to that file; mount exact 8 MiB admin_test_segment, build a serving router with the service delegate, request /get_all_segments, /query_segment?segment=admin_test_segment, and /get_segments_detail, and assert 200 plus every C++-asserted segment and field label.",
+   "reason": "The executable production-router test mounts the exact 8-MiB admin_test_segment through the real service delegate, then verifies 200 responses from all three C++ endpoints plus the segment name, Capacity(bytes), total_segments, segments, allocator_used_bytes, and allocator_capacity_bytes labels.",
    "review": {
     "oracle": "mooncake-store/tests/master_metrics_test.cpp:442-480 and mooncake-store/src/master_admin_service.cpp",
     "reviewed": true
    },
-   "rust": [],
-   "status": "missing"
+   "rust": [
+    {
+     "file": "mooncake-store-master/src/admin_http.rs",
+     "test": "test_admin_http_metrics_service_endpoint_shapes"
+    }
+   ],
+   "status": "covered"
   },
   {
    "behavior": "For the exact three-key 1,024/2,048/512 fixture followed by the four-key partial fixture, BatchExist, BatchPutStart, BatchGetReplicaList, BatchPutEnd, and BatchPutRevoke return the asserted result sizes and exact cumulative request/failure/partial/item/failed-item matrices at each checkpoint.",
