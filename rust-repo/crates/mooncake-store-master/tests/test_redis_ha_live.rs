@@ -143,6 +143,34 @@ fn cpp_parity_redis_snapshot_catalog_list_skips_missing_descriptor() {
     assert!(catalog.list(0).unwrap().is_empty());
 }
 
+#[test]
+fn cpp_parity_redis_snapshot_catalog_list_keeps_healthy_older_descriptor() {
+    if !live_redis_enabled() {
+        eprintln!("skipping live Redis HA e2e; set MOONCAKE_REDIS_E2E=1 to enable");
+        return;
+    }
+
+    let root = tempfile::tempdir().unwrap();
+    let (_guard, object_store, catalog) = redis_snapshot_catalog("snapshot-healthy-list", &root);
+    let mut older = SnapshotDescriptor::new_with_snapshot_root(
+        catalog.get_snapshot_root(),
+        "20240301_120000_001",
+    );
+    older.created_at_ms = 1_700_000_000_000;
+    let mut newer = SnapshotDescriptor::new_with_snapshot_root(
+        catalog.get_snapshot_root(),
+        "20240302_120000_001",
+    );
+    newer.created_at_ms = 1_700_000_000_001;
+    catalog.publish(&older).unwrap();
+    catalog.publish(&newer).unwrap();
+    object_store
+        .delete_objects_with_prefix(&format!("{}descriptor.txt", newer.object_prefix))
+        .unwrap();
+
+    assert_eq!(catalog.list(0).unwrap(), vec![older]);
+}
+
 #[tokio::test]
 async fn cpp_parity_high_availability_redis_test_highavailabilitytest_redisbasicmasterviewoperations()
  {

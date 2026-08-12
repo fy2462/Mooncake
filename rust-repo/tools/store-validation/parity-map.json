@@ -14068,13 +14068,18 @@
     "file": "ha/snapshot/catalog/backends/redis/redis_snapshot_catalog_store_test.cpp",
     "test": "RedisSnapshotCatalogStoreTest.ListSkipsUnreadableSnapshotsAndKeepsHealthyEntries"
    },
-   "reason": "No discoverable Rust Redis-catalog test removes one descriptor from two indexed snapshots and asserts healthy-entry retention. The C++ implementation skips every descriptor load failure, while Rust skips not-found and corrupt descriptors but propagates other object-store read failures; this fixture only exercises not-found.",
+   "reason": "cpp_parity_redis_snapshot_catalog_list_keeps_healthy_older_descriptor publishes ordered older/newer descriptors through production RedisSnapshotCatalogStore in a unique opt-in live Redis namespace, removes only the newer LocalFile descriptor while preserving both index members, and asserts list(0) is exactly [older] with full descriptor equality. This covers the C++ fixture's not-found failure without claiming that Redis list suppresses every other backend read error.",
    "review": {
     "oracle": "redis_snapshot_catalog_store_test.cpp ListSkipsUnreadableSnapshotsAndKeepsHealthyEntries and redis_snapshot_catalog_store.cpp List/LoadSnapshotDescriptor; Rust snapshot.rs RedisSnapshotCatalogStore::list",
     "reviewed": true
    },
-   "rust": [],
-   "status": "missing"
+   "rust": [
+    {
+     "file": "mooncake-store-master/tests/test_redis_ha_live.rs",
+     "test": "cpp_parity_redis_snapshot_catalog_list_keeps_healthy_older_descriptor"
+    }
+   ],
+   "status": "covered"
   },
   {
    "behavior": "Publishing two Redis snapshot descriptors makes the second snapshot latest, returns both descriptors from an unlimited list in newest-first order, and preserves asserted descriptor fields.",
