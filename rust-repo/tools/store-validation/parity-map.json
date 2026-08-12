@@ -13935,13 +13935,18 @@
     "file": "ha/snapshot/catalog/backends/redis/redis_snapshot_catalog_store_test.cpp",
     "test": "RedisSnapshotCatalogStoreTest.DeleteUpdatesLatestAndDeletesPayloadPrefix"
    },
-   "reason": "Semantic difference: C++ atomically promotes the greatest remaining sorted-set id when deleting latest, while Rust deletes the latest key without a fallback. Rust has no discoverable Redis-catalog test for latest deletion, remaining-list visibility, or payload-prefix cleanup.",
+   "reason": "Rust RedisSnapshotCatalogStore::delete now uses the C++-equivalent atomic Redis script: remove the requested index member, and only when it was latest set latest to the highest remaining member or delete the marker. cpp_parity_redis_snapshot_catalog_delete_latest_falls_back_and_deletes_prefix publishes ordered older/newer descriptors in a unique live Redis namespace, deletes newer, and proves get_latest is exact older, list(0) is exactly [older], and the newer LocalFile object prefix is empty. Catalog invisibility is committed before payload deletion, preserving the existing failure ordering.",
    "review": {
     "oracle": "redis_snapshot_catalog_store_test.cpp DeleteUpdatesLatestAndDeletesPayloadPrefix and redis_snapshot_catalog_store.cpp Delete/delete Lua script; Rust snapshot.rs RedisSnapshotCatalogStore::delete",
     "reviewed": true
    },
-   "rust": [],
-   "status": "missing"
+   "rust": [
+    {
+     "file": "mooncake-store-master/tests/test_redis_ha_live.rs",
+     "test": "cpp_parity_redis_snapshot_catalog_delete_latest_falls_back_and_deletes_prefix"
+    }
+   ],
+   "status": "covered"
   },
   {
    "behavior": "Getting latest from an empty Redis snapshot catalog succeeds and returns no descriptor.",

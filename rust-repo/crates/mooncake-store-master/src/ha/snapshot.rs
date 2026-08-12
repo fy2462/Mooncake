@@ -773,25 +773,30 @@ impl SnapshotCatalogStore for RedisSnapshotCatalogStore {
     fn delete(&self, snapshot_id: &str) -> Result<(), HaError> {
         validate_snapshot_id(snapshot_id)?;
         let mut connection = self.connection()?;
-        let latest: Option<String> = redis::cmd("GET")
-            .arg(self.latest_key())
-            .query(&mut connection)
-            .map_err(|e| HaError::Snapshot(format!("redis snapshot catalog get latest: {e}")))?;
-        let mut pipeline = redis::pipe();
-        pipeline
-            .atomic()
-            .cmd("ZREM")
-            .arg(self.index_key())
-            .arg(snapshot_id)
-            .ignore();
-        if latest.as_deref() == Some(snapshot_id) {
-            pipeline.cmd("DEL").arg(self.latest_key()).ignore();
-        }
+        let index_key = self.index_key();
+        let latest_key = self.latest_key();
+        let script = redis::Script::new(
+            r#"
+            redis.call('ZREM', KEYS[1], ARGV[1])
+            if redis.call('GET', KEYS[2]) == ARGV[1] then
+                local next = redis.call('ZREVRANGE', KEYS[1], 0, 0)
+                if next[1] then
+                    redis.call('SET', KEYS[2], next[1])
+                else
+                    redis.call('DEL', KEYS[2])
+                end
+            end
+            return 1
+            "#,
+        );
         // Commit catalog invisibility atomically before deleting payloads.
         // A later object-store failure leaves only unreachable garbage and
         // never a published descriptor pointing at missing data.
-        pipeline
-            .query::<()>(&mut connection)
+        script
+            .key(index_key)
+            .key(latest_key)
+            .arg(snapshot_id)
+            .invoke::<i32>(&mut connection)
             .map_err(|e| HaError::Snapshot(format!("redis snapshot catalog delete: {e}")))?;
         self.object_store
             .delete_objects_with_prefix(&build_snapshot_prefix(&self.snapshot_root, snapshot_id))?;
