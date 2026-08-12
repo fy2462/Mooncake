@@ -449,6 +449,28 @@ fn cpp_parity_localfs_snapshot_ids_reject_traversal_slash_and_nul() {
 }
 
 #[test]
+fn cpp_parity_ha_oplog_ha_recovery_test_cpp_harecoverytest_gc_basiccleanupsemantics() {
+    let mut store = InMemoryOpLog::new(32);
+    for index in 1_u64..=20 {
+        assert_eq!(store.append_payload(1, format!("key_{index}")), index);
+    }
+    assert_eq!(store.read_since(1, 32).unwrap().len(), 20);
+    store.record_snapshot_sequence_id("snap1", 10).unwrap();
+
+    store.cleanup_before(15).unwrap();
+
+    let entries = store.read_since(1, 32).unwrap();
+    assert_eq!(entries.len(), 6);
+    assert_eq!(
+        entries.iter().map(|entry| entry.seq).collect::<Vec<_>>(),
+        [15, 16, 17, 18, 19, 20]
+    );
+    assert!(entries.iter().all(|entry| entry.seq != 14));
+    assert_eq!(entries[0].seq, 15);
+    assert_eq!(store.get_snapshot_sequence_id("snap1"), Ok(10));
+}
+
+#[test]
 fn cpp_parity_localfs_cleanup_empty_store_succeeds() {
     let dir = tempfile::tempdir().unwrap();
     let mut store = LocalFsOpLogStore::new(dir.path(), 10).unwrap();

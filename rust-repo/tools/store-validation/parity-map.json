@@ -10339,13 +10339,18 @@
     "file": "ha/oplog/ha_recovery_test.cpp",
     "test": "HaRecoveryTest.GC_BasicCleanupSemantics"
    },
-   "reason": "Rust test_local_fs_snapshot_sequence_and_cleanup_parity checks a LocalFS cleanup boundary and reopened metadata, not elected/fenced etcd cleanup; no discoverable shared-etcd recovery test asserts the deletion and snapshot-metadata oracle.",
+   "reason": "Rust writes exact sequences 1 through 20 to the production InMemoryOpLog used at the same mock-store boundary as the C++ fixture, records snap1 at sequence 10, cleans before 15, and proves the exact retained sequence vector 15 through 20 plus independently readable snapshot metadata 10.",
    "review": {
-    "oracle": "ha_recovery_test.cpp GC_BasicCleanupSemantics and MockOpLogStore cleanup/snapshot metadata; Rust tests/test_oplog.rs test_local_fs_snapshot_sequence_and_cleanup_parity and oplog_etcd.rs cleanup_before",
+    "oracle": "ha_recovery_test.cpp GC_BasicCleanupSemantics and MockOpLogStore cleanup/snapshot metadata; Rust tests/test_oplog.rs cpp_parity_ha_oplog_ha_recovery_test_cpp_harecoverytest_gc_basiccleanupsemantics",
     "reviewed": true
    },
-   "rust": [],
-   "status": "missing"
+   "rust": [
+    {
+     "file": "mooncake-store-master/tests/test_oplog.rs",
+     "test": "cpp_parity_ha_oplog_ha_recovery_test_cpp_harecoverytest_gc_basiccleanupsemantics"
+    }
+   ],
+   "status": "covered"
   },
   {
    "behavior": "After cleanup before sequence 10, a snapshot at 10 plus shared-oplog entries 11 through 20 restores a newly started standby to 20 objects.",
