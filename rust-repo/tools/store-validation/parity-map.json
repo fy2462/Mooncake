@@ -13987,13 +13987,18 @@
     "file": "ha/snapshot/catalog/backends/redis/redis_snapshot_catalog_store_test.cpp",
     "test": "RedisSnapshotCatalogStoreTest.GetLatestReturnsErrorWhenDescriptorMissing"
    },
-   "reason": "Semantic difference: C++ converts the missing descriptor download to PERSISTENT_FAIL, whereas Rust recognizes an object-store not-found error and returns Ok(None). No discoverable Rust Redis-catalog test asserts either outcome.",
+   "reason": "Rust RedisSnapshotCatalogStore::get_latest now distinguishes an absent Redis latest key (Ok(None)) from a dangling latest id whose descriptor download fails (HaError::Snapshot, corresponding to C++ PERSISTENT_FAIL). cpp_parity_redis_snapshot_catalog_missing_latest_descriptor_is_an_error uses production publish against a unique live Redis namespace, removes only the LocalFile descriptor, and asserts the exact Snapshot error category.",
    "review": {
     "oracle": "redis_snapshot_catalog_store_test.cpp GetLatestReturnsErrorWhenDescriptorMissing and redis_snapshot_catalog_store.cpp GetLatest/LoadSnapshotDescriptor; Rust snapshot.rs RedisSnapshotCatalogStore::get_latest",
     "reviewed": true
    },
-   "rust": [],
-   "status": "missing"
+   "rust": [
+    {
+     "file": "mooncake-store-master/tests/test_redis_ha_live.rs",
+     "test": "cpp_parity_redis_snapshot_catalog_missing_latest_descriptor_is_an_error"
+    }
+   ],
+   "status": "covered"
   },
   {
    "behavior": "Listing a Redis catalog whose indexed snapshot descriptor is missing succeeds with an empty result.",
@@ -14010,13 +14015,18 @@
     "file": "ha/snapshot/catalog/backends/redis/redis_snapshot_catalog_store_test.cpp",
     "test": "RedisSnapshotCatalogStoreTest.ListSkipsSnapshotsWhenDescriptorMissing"
    },
-   "reason": "Rust source likewise skips a recognized not-found descriptor while listing, but no discoverable Rust test constructs a Redis snapshot catalog, leaves a stale indexed id, and asserts the empty result.",
+   "reason": "cpp_parity_redis_snapshot_catalog_list_skips_missing_descriptor publishes one descriptor through production RedisSnapshotCatalogStore in a unique opt-in live Redis namespace, removes only its LocalFile descriptor while retaining the index member, and proves list(0) succeeds with an exact empty vector. The same RAII guard cleans the Redis namespace on success or panic.",
    "review": {
     "oracle": "redis_snapshot_catalog_store_test.cpp ListSkipsSnapshotsWhenDescriptorMissing and redis_snapshot_catalog_store.cpp List; Rust snapshot.rs RedisSnapshotCatalogStore::list",
     "reviewed": true
    },
-   "rust": [],
-   "status": "missing"
+   "rust": [
+    {
+     "file": "mooncake-store-master/tests/test_redis_ha_live.rs",
+     "test": "cpp_parity_redis_snapshot_catalog_list_skips_missing_descriptor"
+    }
+   ],
+   "status": "covered"
   },
   {
    "behavior": "Listing a Redis catalog constructed with no object store returns INVALID_PARAMS.",

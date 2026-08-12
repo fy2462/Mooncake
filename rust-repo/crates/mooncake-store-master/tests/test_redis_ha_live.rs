@@ -1,6 +1,6 @@
 use mooncake_store_master::ha::{
-    LeaderCoordinator, LocalFileSnapshotObjectStore, RedisSnapshotCatalogStore,
-    SnapshotCatalogStore, SnapshotDescriptor,
+    HaError, LeaderCoordinator, LocalFileSnapshotObjectStore, RedisSnapshotCatalogStore,
+    SnapshotCatalogStore, SnapshotDescriptor, SnapshotObjectStore,
 };
 use std::sync::Arc;
 use uuid::Uuid;
@@ -45,16 +45,20 @@ impl Drop for RedisSnapshotCatalogGuard {
 fn redis_snapshot_catalog(
     suffix: &str,
     root: &tempfile::TempDir,
-) -> (RedisSnapshotCatalogGuard, RedisSnapshotCatalogStore) {
+) -> (
+    RedisSnapshotCatalogGuard,
+    Arc<LocalFileSnapshotObjectStore>,
+    RedisSnapshotCatalogStore,
+) {
     let url = live_redis_url();
     let namespace = test_namespace(suffix);
-    let catalog = RedisSnapshotCatalogStore::new(
-        &url,
-        &namespace,
-        Arc::new(LocalFileSnapshotObjectStore::new(root.path().to_path_buf())),
+    let object_store = Arc::new(LocalFileSnapshotObjectStore::new(root.path().to_path_buf()));
+    let catalog = RedisSnapshotCatalogStore::new(&url, &namespace, object_store.clone()).unwrap();
+    (
+        RedisSnapshotCatalogGuard { url, namespace },
+        object_store,
+        catalog,
     )
-    .unwrap();
-    (RedisSnapshotCatalogGuard { url, namespace }, catalog)
 }
 
 #[test]
@@ -65,7 +69,7 @@ fn cpp_parity_redis_snapshot_catalog_get_latest_returns_empty_when_catalog_missi
     }
 
     let root = tempfile::tempdir().unwrap();
-    let (_guard, catalog) = redis_snapshot_catalog("snapshot-empty", &root);
+    let (_guard, _object_store, catalog) = redis_snapshot_catalog("snapshot-empty", &root);
 
     assert_eq!(catalog.get_latest().unwrap(), None);
 }
@@ -78,7 +82,7 @@ fn cpp_parity_redis_snapshot_catalog_publish_list_and_get_latest_round_trip() {
     }
 
     let root = tempfile::tempdir().unwrap();
-    let (_guard, catalog) = redis_snapshot_catalog("snapshot-round-trip", &root);
+    let (_guard, _object_store, catalog) = redis_snapshot_catalog("snapshot-round-trip", &root);
     let make_descriptor = |snapshot_id: &str| {
         let mut descriptor =
             SnapshotDescriptor::new_with_snapshot_root(catalog.get_snapshot_root(), snapshot_id);
@@ -95,6 +99,48 @@ fn cpp_parity_redis_snapshot_catalog_publish_list_and_get_latest_round_trip() {
 
     assert_eq!(catalog.get_latest().unwrap(), Some(second.clone()));
     assert_eq!(catalog.list(0).unwrap(), vec![second, first]);
+}
+
+#[test]
+fn cpp_parity_redis_snapshot_catalog_missing_latest_descriptor_is_an_error() {
+    if !live_redis_enabled() {
+        eprintln!("skipping live Redis HA e2e; set MOONCAKE_REDIS_E2E=1 to enable");
+        return;
+    }
+
+    let root = tempfile::tempdir().unwrap();
+    let (_guard, object_store, catalog) = redis_snapshot_catalog("snapshot-missing-latest", &root);
+    let descriptor = SnapshotDescriptor::new_with_snapshot_root(
+        catalog.get_snapshot_root(),
+        "20240302_120000_001",
+    );
+    catalog.publish(&descriptor).unwrap();
+    object_store
+        .delete_objects_with_prefix(&format!("{}descriptor.txt", descriptor.object_prefix))
+        .unwrap();
+
+    assert!(matches!(catalog.get_latest(), Err(HaError::Snapshot(_))));
+}
+
+#[test]
+fn cpp_parity_redis_snapshot_catalog_list_skips_missing_descriptor() {
+    if !live_redis_enabled() {
+        eprintln!("skipping live Redis HA e2e; set MOONCAKE_REDIS_E2E=1 to enable");
+        return;
+    }
+
+    let root = tempfile::tempdir().unwrap();
+    let (_guard, object_store, catalog) = redis_snapshot_catalog("snapshot-missing-list", &root);
+    let descriptor = SnapshotDescriptor::new_with_snapshot_root(
+        catalog.get_snapshot_root(),
+        "20240302_120000_001",
+    );
+    catalog.publish(&descriptor).unwrap();
+    object_store
+        .delete_objects_with_prefix(&format!("{}descriptor.txt", descriptor.object_prefix))
+        .unwrap();
+
+    assert!(catalog.list(0).unwrap().is_empty());
 }
 
 #[tokio::test]

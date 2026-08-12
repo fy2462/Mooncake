@@ -726,7 +726,6 @@ impl SnapshotCatalogStore for RedisSnapshotCatalogStore {
                 deserialize_snapshot_descriptor(&self.snapshot_root, &snapshot_id, &payload)
                     .map(Some)
             }
-            Err(error) if self.object_store.is_not_found_error(&error.to_string()) => Ok(None),
             Err(error) => Err(error),
         }
     }
