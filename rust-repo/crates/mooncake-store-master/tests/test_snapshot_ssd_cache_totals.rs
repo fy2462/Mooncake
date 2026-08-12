@@ -102,6 +102,10 @@ fn assert_durable_inventory_matches(first: &LoadedSnapshot, second: &LoadedSnaps
         second.local_disk_segments.len(),
         first.local_disk_segments.len()
     );
+    assert!(first.tasks.is_empty());
+    assert!(second.tasks.is_empty());
+    assert!(first.local_disk_segments.is_empty());
+    assert!(second.local_disk_segments.is_empty());
 
     let (first_key, first_object) = &first.objects[0];
     let (second_key, second_object) = &second.objects[0];
@@ -119,6 +123,18 @@ fn assert_durable_inventory_matches(first: &LoadedSnapshot, second: &LoadedSnaps
         assert_eq!(second_replica.size, first_replica.size);
         assert_eq!(second_replica.status, first_replica.status);
         assert_eq!(second_replica.replica_type, first_replica.replica_type);
+        assert_eq!(
+            second_replica.holder_client_id,
+            first_replica.holder_client_id
+        );
+        assert_eq!(
+            second_replica.local_disk_storage_id,
+            first_replica.local_disk_storage_id
+        );
+        assert_eq!(
+            second_replica.local_disk_generation_id,
+            first_replica.local_disk_generation_id
+        );
     }
 
     let first_segment = &first.segments[0];
@@ -126,6 +142,10 @@ fn assert_durable_inventory_matches(first: &LoadedSnapshot, second: &LoadedSnaps
     assert_eq!(second_segment.segment.id, first_segment.segment.id);
     assert_eq!(second_segment.segment.name, first_segment.segment.name);
     assert_eq!(second_segment.segment.size, first_segment.segment.size);
+    assert_eq!(
+        second_segment.segment.host_id,
+        first_segment.segment.host_id
+    );
     assert_eq!(second_segment.used, first_segment.used);
     assert_eq!(second_segment.client_id, first_segment.client_id);
     assert_eq!(second_segment.status, first_segment.status);

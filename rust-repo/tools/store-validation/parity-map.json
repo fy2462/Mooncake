@@ -6364,13 +6364,18 @@
     "file": "ha/snapshot/master_service_ssd_test_for_snapshot.cpp",
     "test": "MasterServiceSSDSnapshotTest.RestorePreservesCacheTotalMetrics"
    },
-   "reason": "test_snapshot_restore_rebuilds_memory_and_disk_cache_total_metrics restores a synthetic StorageBackend inventory and checks gauges, not a snapshot saved by a live service. It does not assert the restored RPC list or the fixture's fresh-service and second-save LocalDisk/SSD state equivalence.",
+   "reason": "Rust test_snapshot_ssd_cache_totals.rs::cpp_parity_snapshot_ssd_restore_preserves_cache_total_metrics builds the live 64-MiB Memory plus LocalDisk service fixture, completes one 1,024-byte object on both Memory and Disk, verifies both cache totals increment by one, performs a real native snapshot save, resets the process gauges, and constructs a fresh restoring service. It proves both totals rebuild to one, the production replica-list RPC returns exactly two Complete Memory/Disk replicas, and durable object/replica/segment identities and accounting match. It then saves the restored service again, reloads a third service, repeats the gauge and inventory checks, and proves the fixture's empty task and LocalDisk-registration side tables remain empty rather than acquiring restore artifacts.",
    "review": {
-    "oracle": "mooncake-store/tests/ha/snapshot/master_service_ssd_test_for_snapshot.cpp RestorePreservesCacheTotalMetrics plus MasterServiceSnapshotTestBase::TearDown/TestSnapshotAndRestore",
+    "oracle": "mooncake-store/tests/ha/snapshot/master_service_ssd_test_for_snapshot.cpp RestorePreservesCacheTotalMetrics plus MasterServiceSnapshotTestBase::TearDown/TestSnapshotAndRestore; Rust test_snapshot_ssd_cache_totals.rs cpp_parity_snapshot_ssd_restore_preserves_cache_total_metrics",
     "reviewed": true
    },
-   "rust": [],
-   "status": "missing"
+   "rust": [
+    {
+     "file": "mooncake-store-master/tests/test_snapshot_ssd_cache_totals.rs",
+     "test": "cpp_parity_snapshot_ssd_restore_preserves_cache_total_metrics"
+    }
+   ],
+   "status": "covered"
   },
   {
    "behavior": "After Memory PutEnd, revoking the processing Disk replica leaves exactly one readable Memory replica, and snapshot save followed by fresh LocalDisk/SSD service restore preserves that result, replica metadata, segment/accounting, LocalDisk state/tasks, and second-save state.",
