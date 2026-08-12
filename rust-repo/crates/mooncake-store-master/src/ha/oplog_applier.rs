@@ -3030,6 +3030,59 @@ mod tests {
     }
 
     #[test]
+    fn cpp_parity_ha_oplog_ha_recovery_test_cpp_harecoverytest_snapshotseqmismatch_gapinoplog() {
+        use crate::oplog::test_support::TEST_CPP_OP_PUT_END;
+
+        let state = make_state();
+        let applier = OpLogApplier::new(state.clone());
+        let baseline = (1_u64..=10)
+            .map(|sequence| {
+                cpp_wire_record_for_key(sequence, TEST_CPP_OP_PUT_END, &format!("key_{sequence}"))
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(applier.apply_op_log_entries(&baseline), 10);
+        applier.recover(10);
+        assert_eq!(state.objects.len(), 10);
+        let future = (15_u64..=20)
+            .map(|sequence| {
+                cpp_wire_record_for_key(sequence, TEST_CPP_OP_PUT_END, &format!("key_{sequence}"))
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(applier.apply_op_log_entries(&future), 0);
+
+        assert_eq!(applier.process_pending_entries_at(Instant::now()), 0);
+
+        assert_eq!(applier.get_expected_sequence_id(), 11);
+        assert!(applier.missing_sequence_first_seen.lock().contains_key(&11));
+        assert_eq!(state.objects.len(), 10);
+        for index in 1..=10 {
+            assert!(state.objects.contains_key(&format!("default\0key_{index}")));
+        }
+        assert!(!state.objects.contains_key("default\0key_15"));
+    }
+
+    #[test]
+    fn cpp_parity_ha_oplog_ha_recovery_test_cpp_harecoverytest_gc_nosnapshot_incompleterecovery() {
+        use crate::oplog::test_support::TEST_CPP_OP_PUT_END;
+
+        let state = make_state();
+        let applier = OpLogApplier::new(state.clone());
+        let surviving = (10_u64..=20)
+            .map(|sequence| {
+                cpp_wire_record_for_key(sequence, TEST_CPP_OP_PUT_END, &format!("key_{sequence}"))
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(applier.apply_op_log_entries(&surviving), 0);
+
+        assert_eq!(applier.process_pending_entries_at(Instant::now()), 0);
+
+        assert_eq!(applier.get_expected_sequence_id(), 1);
+        assert!(applier.missing_sequence_first_seen.lock().contains_key(&1));
+        assert!(state.objects.is_empty());
+        assert!(!state.objects.contains_key("default\0key_10"));
+    }
+
+    #[test]
     fn cpp_parity_ha_oplog_oplog_applier_test_cpp_oplogappliertest_testapplyoplogentries_batch() {
         use crate::oplog::test_support::TEST_CPP_OP_PUT_END;
 

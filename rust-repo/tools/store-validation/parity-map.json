@@ -10300,7 +10300,7 @@
    "status": "covered"
   },
   {
-   "behavior": "With snapshot sequence 10 and oplog entries 15 through 20 pending, one post-timeout ProcessPendingEntries call skips sequence 11, registers sequence 12 as the next gap, and leaves at least the ten snapshot objects intact.",
+   "behavior": "With snapshot sequence 10 and oplog entries 15 through 20 pending, the fixture's single ProcessPendingEntries call first registers missing sequence 11, leaves expected sequence 11, and keeps the ten snapshot objects intact.",
    "boundary": [
     "master",
     "ha",
@@ -10315,13 +10315,18 @@
     "file": "ha/oplog/ha_recovery_test.cpp",
     "test": "HaRecoveryTest.SnapshotSeqMismatch_GapInOpLog"
    },
-   "reason": "Semantic gap: C++ source requests and timeout-skips each detected missing sequence under a per-gap timer; this test observes only the first skip, not a complete 11-through-14 skip or 15-through-20 drain. Rust buffers future records without timeout skipping, and no elected-etcd recovery oracle covers the observed first-skip policy.",
+   "reason": "Rust materializes ten baseline objects, recovers the production applier at sequence 10, buffers exact future sequences 15 through 20, then performs the fixture's single pending pass. It proves missing 11 is registered, expected remains 11, all ten baseline keys remain, and key15 is not applied; the preceding sleep in C++ occurs before the first missing timestamp is recorded and therefore does not trigger a skip.",
    "review": {
-    "oracle": "ha_recovery_test.cpp SnapshotSeqMismatch_GapInOpLog plus oplog_applier.h missing-entry timeouts/oplog_applier.cpp ProcessPendingEntries; Rust ha/oplog_applier.rs test_skip_gap",
+    "oracle": "ha_recovery_test.cpp SnapshotSeqMismatch_GapInOpLog plus oplog_applier.h missing-entry timeouts/oplog_applier.cpp ProcessPendingEntries; Rust ha/oplog_applier.rs cpp_parity_ha_oplog_ha_recovery_test_cpp_harecoverytest_snapshotseqmismatch_gapinoplog",
     "reviewed": true
    },
-   "rust": [],
-   "status": "missing"
+   "rust": [
+    {
+     "file": "mooncake-store-master/src/ha/oplog_applier.rs",
+     "test": "cpp_parity_ha_oplog_ha_recovery_test_cpp_harecoverytest_snapshotseqmismatch_gapinoplog"
+    }
+   ],
+   "status": "covered"
   },
   {
    "behavior": "Cleanup before sequence 15 removes oplog entries 1 through 14, retains 15 through 20, and leaves snapshot-sequence metadata readable.",
@@ -10383,7 +10388,7 @@
    "status": "covered"
   },
   {
-   "behavior": "When GC removes sequences 1 through 9 and no snapshot is available, applying surviving entries 10 through 20 initially applies zero; one post-timeout ProcessPendingEntries call skips sequence 1, registers sequence 2, and leaves final metadata size at most 11.",
+   "behavior": "When sequences 1 through 9 are unavailable and no snapshot exists, applying surviving entries 10 through 20 initially applies zero; the fixture's single ProcessPendingEntries call registers missing sequence 1, leaves expected sequence 1, and materializes no future entries.",
    "boundary": [
     "master",
     "ha",
@@ -10399,13 +10404,18 @@
     "file": "ha/oplog/ha_recovery_test.cpp",
     "test": "HaRecoveryTest.GC_NoSnapshot_IncompleteRecovery"
    },
-   "reason": "Semantic gap: C++ source can timeout-skip an irrecoverable prefix one detected gap at a time, but this test observes only the first sequence-1 skip and does not prove eventual prefix drain. Rust test_skip_gap keeps future records unapplied with no timeout-skip path, and no elected-etcd test covers the observed first-skip behavior.",
+   "reason": "Rust starts a production applier from the empty baseline, buffers exact surviving sequences 10 through 20 with zero initially applied, then performs the fixture's single pending pass. It proves missing 1 is registered, expected remains 1, and no future key is materialized; the preceding C++ sleep occurs before the first missing timestamp is recorded and cannot trigger a skip.",
    "review": {
-    "oracle": "ha_recovery_test.cpp GC_NoSnapshot_IncompleteRecovery plus oplog_applier.cpp ProcessPendingEntries; Rust ha/oplog_applier.rs test_skip_gap",
+    "oracle": "ha_recovery_test.cpp GC_NoSnapshot_IncompleteRecovery plus oplog_applier.cpp ProcessPendingEntries; Rust ha/oplog_applier.rs cpp_parity_ha_oplog_ha_recovery_test_cpp_harecoverytest_gc_nosnapshot_incompleterecovery",
     "reviewed": true
    },
-   "rust": [],
-   "status": "missing"
+   "rust": [
+    {
+     "file": "mooncake-store-master/src/ha/oplog_applier.rs",
+     "test": "cpp_parity_ha_oplog_ha_recovery_test_cpp_harecoverytest_gc_nosnapshot_incompleterecovery"
+    }
+   ],
+   "status": "covered"
   },
   {
    "behavior": "A standby that has applied through sequence 10 performs final shared-oplog catch-up through 15 before promotion, yielding 15 objects and expected sequence 16.",
