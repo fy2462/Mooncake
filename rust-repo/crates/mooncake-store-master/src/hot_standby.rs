@@ -296,6 +296,19 @@ mod tests {
         thread: Option<std::thread::JoinHandle<()>>,
     }
 
+    struct SingleErrorFixtureOpLog {
+        inner: InMemoryOpLog,
+        notifier_healthy: Arc<AtomicBool>,
+        error_delivered: Arc<AtomicBool>,
+        allow_reconnect: Arc<AtomicBool>,
+    }
+
+    struct SingleErrorFixtureNotifier {
+        healthy: Arc<AtomicBool>,
+        error_delivered: Arc<AtomicBool>,
+        thread: Option<std::thread::JoinHandle<()>>,
+    }
+
     struct StrictBaselineOpLog {
         inner: InMemoryOpLog,
         minimum_since: u64,
@@ -607,18 +620,106 @@ mod tests {
             &mut self,
             _start_seq_id: u64,
             _on_entry: OpLogEntryCallback,
-            mut on_error: OpLogErrorCallback,
+            _on_error: OpLogErrorCallback,
         ) -> Result<(), HaError> {
             self.healthy.store(true, Ordering::Release);
             let healthy = self.healthy.clone();
             self.thread = Some(std::thread::spawn(move || {
                 std::thread::sleep(std::time::Duration::from_millis(20));
-                for _ in 0..10 {
-                    on_error(HaError::InvalidBackend(
-                        "injected etcd watch recovery error".into(),
-                    ));
-                }
                 healthy.store(false, Ordering::Release);
+            }));
+            Ok(())
+        }
+
+        fn stop(&mut self) {
+            if let Some(thread) = self.thread.take() {
+                thread.join().unwrap();
+            }
+            self.healthy.store(false, Ordering::Release);
+        }
+
+        fn is_healthy(&self) -> bool {
+            self.healthy.load(Ordering::Acquire)
+        }
+    }
+
+    impl OpLogStore for SingleErrorFixtureOpLog {
+        fn append(&mut self, entry: &OpLogRecord) -> Result<u64, HaError> {
+            self.inner.append(entry)
+        }
+
+        fn read_since(
+            &self,
+            since_seq: u64,
+            max_count: usize,
+        ) -> Result<Vec<OpLogRecord>, HaError> {
+            while !self.allow_reconnect.load(Ordering::Acquire) {
+                std::thread::sleep(std::time::Duration::from_millis(1));
+            }
+            self.inner.read_since(since_seq, max_count)
+        }
+
+        fn latest_sequence(&self) -> u64 {
+            self.inner.latest_sequence()
+        }
+
+        fn max_sequence_id(&self) -> Result<u64, HaError> {
+            self.inner.max_sequence_id()
+        }
+
+        fn update_latest_sequence_id(&mut self, sequence_id: u64) -> Result<(), HaError> {
+            self.inner.update_latest_sequence_id(sequence_id)
+        }
+
+        fn record_snapshot_sequence_id(
+            &mut self,
+            snapshot_id: &str,
+            sequence_id: u64,
+        ) -> Result<(), HaError> {
+            self.inner
+                .record_snapshot_sequence_id(snapshot_id, sequence_id)
+        }
+
+        fn get_snapshot_sequence_id(&self, snapshot_id: &str) -> Result<u64, HaError> {
+            self.inner.get_snapshot_sequence_id(snapshot_id)
+        }
+
+        fn cleanup_before(&mut self, before_sequence_id: u64) -> Result<(), HaError> {
+            self.inner.cleanup_before(before_sequence_id)
+        }
+
+        fn flush_durable(&mut self) -> Result<(), HaError> {
+            self.inner.flush_durable()
+        }
+
+        fn poll_from(&self, since_seq: u64, max_count: usize) -> OpLogPollResult {
+            self.inner.poll_from(since_seq, max_count)
+        }
+
+        fn create_change_notifier(&self) -> Option<Box<dyn OpLogChangeNotifier>> {
+            Some(Box::new(SingleErrorFixtureNotifier {
+                healthy: self.notifier_healthy.clone(),
+                error_delivered: self.error_delivered.clone(),
+                thread: None,
+            }))
+        }
+    }
+
+    impl OpLogChangeNotifier for SingleErrorFixtureNotifier {
+        fn start(
+            &mut self,
+            _start_seq_id: u64,
+            _on_entry: OpLogEntryCallback,
+            mut on_error: OpLogErrorCallback,
+        ) -> Result<(), HaError> {
+            self.healthy.store(true, Ordering::Release);
+            let error_delivered = self.error_delivered.clone();
+            self.thread = Some(std::thread::spawn(move || {
+                std::thread::sleep(std::time::Duration::from_millis(20));
+                on_error(HaError::InvalidBackend(
+                    "injected single notifier error".into(),
+                ));
+                error_delivered.store(true, Ordering::Release);
             }));
             Ok(())
         }
@@ -881,6 +982,63 @@ mod tests {
         assert_eq!(status.applied_seq_id, 3);
         assert_eq!(status.primary_seq_id, 3);
         assert_eq!(status.lag_entries, 0);
+    }
+
+    #[tokio::test]
+    async fn cpp_parity_ha_oplog_oplog_replicator_test_cpp_oplogreplicatortest_injecterror_notifiescallback()
+     {
+        let error_delivered = Arc::new(AtomicBool::new(false));
+        let allow_reconnect = Arc::new(AtomicBool::new(false));
+        let mut service = HotStandbyService::new(
+            Arc::new(MasterState::empty()),
+            HotStandbyConfig {
+                enable_oplog_following: true,
+                oplog_poll_interval_ms: 10,
+                cluster_id: "single-notifier-error".to_string(),
+                ..Default::default()
+            },
+        );
+        service.set_oplog_store(Box::new(SingleErrorFixtureOpLog {
+            inner: InMemoryOpLog::new(16),
+            notifier_healthy: Arc::new(AtomicBool::new(false)),
+            error_delivered: error_delivered.clone(),
+            allow_reconnect: allow_reconnect.clone(),
+        }));
+
+        service.start().await.unwrap();
+        let transition = tokio::time::timeout(std::time::Duration::from_secs(1), async {
+            loop {
+                if error_delivered.load(Ordering::Acquire) {
+                    let history = service.state_machine.get_transition_history(16);
+                    if history.iter().any(|record| {
+                        record.from_state == StandbyState::Watching
+                            && record.to_state == StandbyState::Reconnecting
+                            && record.event == StandbyEvent::WatchBroken
+                    }) {
+                        break;
+                    }
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+            }
+        })
+        .await;
+
+        if transition.is_ok() {
+            assert_eq!(
+                service.state_machine.get_state(),
+                StandbyState::Reconnecting
+            );
+            assert!(!service.state_machine.is_connected());
+            assert!(!service.state_machine.is_watch_healthy());
+            assert!(!service.state_machine.is_ready_for_promotion());
+            let status = service.sync_status();
+            assert_eq!(status.state, StandbyState::Reconnecting);
+            assert!(!status.is_connected);
+            assert!(!service.is_ready_for_promotion());
+        }
+        allow_reconnect.store(true, Ordering::Release);
+        service.stop();
+        transition.expect("one notifier error did not emit WatchBroken");
     }
 
     #[tokio::test]
@@ -3613,9 +3771,7 @@ impl HotStandbyService {
                             start_seq_id,
                             on_entry,
                             Box::new(move |_err| {
-                                if error_state_machine.is_in_state(StandbyState::Watching) {
-                                    error_state_machine.increment_errors();
-                                } else if !error_state_machine.is_in_state(StandbyState::Recovering)
+                                if !error_state_machine.is_in_state(StandbyState::Recovering)
                                     && !error_state_machine.is_in_state(StandbyState::Failed)
                                 {
                                     error_state_machine.process_event(StandbyEvent::WatchBroken);

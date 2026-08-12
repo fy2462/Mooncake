@@ -12960,13 +12960,18 @@
     "file": "ha/oplog/oplog_replicator_test.cpp",
     "test": "OpLogReplicatorTest.InjectError_NotifiesCallback"
    },
-   "reason": "Semantic divergence: C++ forwards one notifier error immediately as WATCH_BROKEN, while Rust intentionally accumulates notifier errors and enters recovery only at its ten-error threshold. Existing recovery tests preserve that Rust policy, so a single-error WATCH_BROKEN callback must not be claimed.",
+   "reason": "Rust hot_standby.rs:cpp_parity_ha_oplog_oplog_replicator_test_cpp_oplogreplicatortest_injecterror_notifiescallback starts the production HotStandby notifier wiring with a deterministic notifier that remains healthy and invokes its error callback exactly once. It proves the callback commits WATCHING to RECONNECTING through WATCH_BROKEN, clears connected/watch-healthy/promotion-ready state, updates sync status, and stops cleanly. Backend notifier retry thresholds remain an independent transport policy and are not claimed by this row.",
    "review": {
-    "oracle": "oplog_replicator_test.cpp InjectError_NotifiesCallback and OpLogReplicator error callback; Rust hot_standby.rs notifier on_error closure and StandbyStateMachine error threshold",
+    "oracle": "oplog_replicator_test.cpp InjectError_NotifiesCallback and OpLogReplicator error callback; Rust hot_standby.rs notifier on_error closure and exact single-error service witness",
     "reviewed": true
    },
-   "rust": [],
-   "status": "missing"
+   "rust": [
+    {
+     "file": "mooncake-store-master/src/hot_standby.rs",
+     "test": "cpp_parity_ha_oplog_oplog_replicator_test_cpp_oplogreplicatortest_injecterror_notifiescallback"
+    }
+   ],
+   "status": "covered"
   },
   {
    "behavior": "A fresh replicator reports last processed sequence zero.",
