@@ -295,7 +295,6 @@ impl MasterServiceImpl {
             self.state.processing_keys.remove(&scoped_key);
         }
         self.persist_detached_allocator_replicas(&scoped_key, removed, "put_revoke")?;
-        metrics::PUT_REVOKE_REQUESTS.inc();
         Ok(Response::new(proto::PutRevokeResponse {}))
     }
 

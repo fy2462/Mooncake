@@ -745,6 +745,8 @@ pub(crate) fn sync_segment_usage(state: &MasterState, segment_ids: impl IntoIter
             entry.used = used;
         }
     }
+    drop(allocator);
+    metrics::sync_memory_metrics(state);
 }
 
 /// 从 nof_allocator 同步指定 NoF segment 的 used 字节数到 nof_segments 表。

@@ -33653,13 +33653,18 @@
     "file": "master_metrics_test.cpp",
     "test": "MasterMetricsTest.BasicRequestTest"
    },
-   "reason": "Production prerequisite: complete direct metric observation for per-segment allocation/capacity/ratios and ensure the listed RPCs update the C++-observable counter/gauge set in mooncake-store-master/src/metrics.rs and service handlers. Add cpp_parity_basic_request_metrics_lifecycle to mooncake-store-master/tests/test_master_metrics.rs; with a locked baseline and deterministic/injectable lease-expiry control (no correctness sleep), execute the exact 16-MiB/1,024-byte sequence and assert this executable matrix: Mount => global allocated=0/capacity=16 MiB/ratio=0, segment allocated=0/capacity=16 MiB/ratio=0, Mount requests/failures=1/0; first PutStart => key=1, global/segment allocated=1,024, PutStart=1/0; PutRevoke => key=0, global/segment allocated=0, PutRevoke=1/0; second PutStart => key=1, global/segment allocated=1,024, PutStart=2/0; PutEnd => key=1, global/segment allocated=1,024, PutEnd=1/0; ExistKey => Exist=1/0; GetReplicaList => GetReplicaList=1/0; lease-expired Remove => Remove=1/0, key=0, global/segment allocated=0; completed PutStart/PutEnd then RemoveAll returns 1 => RemoveAll=1/0, key=0, global/segment allocated=0; completed PutStart/PutEnd then Unmount => Unmount=1/0, key=0, global allocated=0/capacity=0/ratio=0, segment allocated=0/capacity=0/ratio=0; empty-name and unknown-name segment ratios are each 0.",
+   "reason": "Rust metrics.rs now exposes authoritative global and segment-labeled Memory allocation/capacity gauges with zero-safe ratios, while the scalar Tonic boundary counts each listed request once and each returned error once. test_master_metrics.rs::cpp_parity_master_metrics_test_cpp_mastermetricstest_basicrequesttest runs in a fresh child process, uses the real service with deterministic zero-duration lease expiry, and executes the exact 16-MiB/1,024-byte Mount, PutStart/Revoke, PutStart/End, Exist, Get, non-force Remove, RemoveAll, and Unmount lifecycle. It asserts every C++ cumulative request/failure pair, key count, global/segment allocation and capacity checkpoint, RemoveAll count one, and zero values after unmount and for an unknown segment.",
    "review": {
-    "oracle": "mooncake-store/tests/master_metrics_test.cpp:137-271 and WrappedMasterService/MasterMetricManager request paths",
+    "oracle": "mooncake-store/tests/master_metrics_test.cpp:137-271, Rust metrics.rs/grpc_trait.rs authoritative observation and request paths, and test_master_metrics.rs cpp_parity_master_metrics_test_cpp_mastermetricstest_basicrequesttest",
     "reviewed": true
    },
-   "rust": [],
-   "status": "missing"
+   "rust": [
+    {
+     "file": "mooncake-store-master/tests/test_master_metrics.rs",
+     "test": "cpp_parity_master_metrics_test_cpp_mastermetricstest_basicrequesttest"
+    }
+   ],
+   "status": "covered"
   },
   {
    "behavior": "Cache-stat discriminants remain 0 through 7 with documented aliases; rounded reuse ratios derive from cumulative hits/current totals; after one completed Memory object and repeated successful gets, baseline deltas, valid-get bounds, and Memory hits per current object greater than 1.0 hold.",

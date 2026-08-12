@@ -60,7 +60,6 @@ impl MasterServiceImpl {
         if promotion_eligible {
             let _ = try_push_promotion_queue(&self.state, &scoped_key, true);
         }
-        metrics::GET_REQUESTS.inc();
         record_cache_hit_metrics(first_replica_type, object_size);
         let lease_ttl_ms = self.state.runtime_config.lease_ttl.as_millis() as u64;
         Ok(proto::GetReplicaListResponse {
@@ -201,7 +200,6 @@ impl MasterServiceImpl {
             });
         }
 
-        metrics::GET_REQUESTS.inc();
         Ok(Response::new(proto::GetReplicaListByRegexResponse {
             entries,
         }))
@@ -259,7 +257,6 @@ impl MasterServiceImpl {
             return Err(status);
         }
         self.publish_kv_removed(&scoped_key, &object);
-        metrics::REMOVE_REQUESTS.inc();
         Ok(Response::new(proto::RemoveResponse {}))
     }
 
@@ -320,7 +317,6 @@ impl MasterServiceImpl {
         }
 
         metrics::REMOVE_BY_REGEX_REQUESTS.inc();
-        metrics::REMOVE_REQUESTS.inc_by(removed as u64);
         Ok(Response::new(proto::RemoveByRegexResponse {
             removed_count: removed,
         }))

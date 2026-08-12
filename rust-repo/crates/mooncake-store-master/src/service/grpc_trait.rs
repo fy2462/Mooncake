@@ -40,8 +40,16 @@ impl MasterService for MasterServiceImpl {
         &self,
         request: Request<proto::MountSegmentRequest>,
     ) -> Result<Response<proto::MountSegmentResponse>, Status> {
-        let _foreground_request_guard = self.begin_foreground_request()?;
-        MasterServiceImpl::mount_segment_impl(self, request).await
+        metrics::MOUNT_SEGMENT_REQUESTS.inc();
+        let result = match self.begin_foreground_request() {
+            Ok(_guard) => MasterServiceImpl::mount_segment_impl(self, request).await,
+            Err(status) => Err(status),
+        };
+        if result.is_err() {
+            metrics::MOUNT_SEGMENT_FAILURES.inc();
+        }
+        metrics::sync_memory_metrics(&self.state);
+        result
     }
 
     async fn mount_no_f_segment(
@@ -56,8 +64,16 @@ impl MasterService for MasterServiceImpl {
         &self,
         request: Request<proto::UnmountSegmentRequest>,
     ) -> Result<Response<proto::UnmountSegmentResponse>, Status> {
-        let _foreground_request_guard = self.begin_foreground_request()?;
-        MasterServiceImpl::unmount_segment_impl(self, request).await
+        metrics::UNMOUNT_SEGMENT_REQUESTS.inc();
+        let result = match self.begin_foreground_request() {
+            Ok(_guard) => MasterServiceImpl::unmount_segment_impl(self, request).await,
+            Err(status) => Err(status),
+        };
+        if result.is_err() {
+            metrics::UNMOUNT_SEGMENT_FAILURES.inc();
+        }
+        metrics::sync_memory_metrics(&self.state);
+        result
     }
 
     async fn unmount_no_f_segment(
@@ -163,8 +179,16 @@ impl MasterService for MasterServiceImpl {
         &self,
         request: Request<proto::ExistKeyRequest>,
     ) -> Result<Response<proto::ExistKeyResponse>, Status> {
-        let _foreground_request_guard = self.begin_foreground_request()?;
-        MasterServiceImpl::exist_key_impl(self, request).await
+        metrics::EXIST_KEY_REQUESTS.inc();
+        let result = match self.begin_foreground_request() {
+            Ok(_guard) => MasterServiceImpl::exist_key_impl(self, request).await,
+            Err(status) => Err(status),
+        };
+        if result.is_err() {
+            metrics::EXIST_KEY_FAILURES.inc();
+        }
+        metrics::sync_memory_metrics(&self.state);
+        result
     }
 
     async fn get_all_keys(
@@ -259,6 +283,7 @@ impl MasterService for MasterServiceImpl {
         if result.is_err() {
             metrics::PUT_START_FAILURES.inc();
         }
+        metrics::sync_memory_metrics(&self.state);
         result
     }
 
@@ -266,16 +291,32 @@ impl MasterService for MasterServiceImpl {
         &self,
         request: Request<proto::PutEndRequest>,
     ) -> Result<Response<proto::PutEndResponse>, Status> {
-        let _foreground_request_guard = self.begin_foreground_request()?;
-        MasterServiceImpl::put_end_impl(self, request).await
+        metrics::PUT_END_REQUESTS.inc();
+        let result = match self.begin_foreground_request() {
+            Ok(_guard) => MasterServiceImpl::put_end_impl(self, request).await,
+            Err(status) => Err(status),
+        };
+        if result.is_err() {
+            metrics::PUT_END_FAILURES.inc();
+        }
+        metrics::sync_memory_metrics(&self.state);
+        result
     }
 
     async fn put_revoke(
         &self,
         request: Request<proto::PutRevokeRequest>,
     ) -> Result<Response<proto::PutRevokeResponse>, Status> {
-        let _foreground_request_guard = self.begin_foreground_request()?;
-        MasterServiceImpl::put_revoke_impl(self, request).await
+        metrics::PUT_REVOKE_REQUESTS.inc();
+        let result = match self.begin_foreground_request() {
+            Ok(_guard) => MasterServiceImpl::put_revoke_impl(self, request).await,
+            Err(status) => Err(status),
+        };
+        if result.is_err() {
+            metrics::PUT_REVOKE_FAILURES.inc();
+        }
+        metrics::sync_memory_metrics(&self.state);
+        result
     }
 
     async fn add_replica(
@@ -290,8 +331,16 @@ impl MasterService for MasterServiceImpl {
         &self,
         request: Request<proto::GetReplicaListRequest>,
     ) -> Result<Response<proto::GetReplicaListResponse>, Status> {
-        let _foreground_request_guard = self.begin_foreground_request()?;
-        MasterServiceImpl::get_replica_list_impl(self, request).await
+        metrics::GET_REQUESTS.inc();
+        let result = match self.begin_foreground_request() {
+            Ok(_guard) => MasterServiceImpl::get_replica_list_impl(self, request).await,
+            Err(status) => Err(status),
+        };
+        if result.is_err() {
+            metrics::GET_FAILURES.inc();
+        }
+        metrics::sync_memory_metrics(&self.state);
+        result
     }
 
     async fn batch_get_replica_list(
@@ -314,8 +363,16 @@ impl MasterService for MasterServiceImpl {
         &self,
         request: Request<proto::RemoveRequest>,
     ) -> Result<Response<proto::RemoveResponse>, Status> {
-        let _foreground_request_guard = self.begin_foreground_request()?;
-        MasterServiceImpl::remove_impl(self, request).await
+        metrics::REMOVE_REQUESTS.inc();
+        let result = match self.begin_foreground_request() {
+            Ok(_guard) => MasterServiceImpl::remove_impl(self, request).await,
+            Err(status) => Err(status),
+        };
+        if result.is_err() {
+            metrics::REMOVE_FAILURES.inc();
+        }
+        metrics::sync_memory_metrics(&self.state);
+        result
     }
 
     async fn remove_by_regex(
@@ -330,8 +387,16 @@ impl MasterService for MasterServiceImpl {
         &self,
         request: Request<proto::RemoveAllRequest>,
     ) -> Result<Response<proto::RemoveAllResponse>, Status> {
-        let _foreground_request_guard = self.begin_foreground_request()?;
-        MasterServiceImpl::remove_all_impl(self, request).await
+        metrics::REMOVE_ALL_REQUESTS.inc();
+        let result = match self.begin_foreground_request() {
+            Ok(_guard) => MasterServiceImpl::remove_all_impl(self, request).await,
+            Err(status) => Err(status),
+        };
+        if result.is_err() {
+            metrics::REMOVE_ALL_FAILURES.inc();
+        }
+        metrics::sync_memory_metrics(&self.state);
+        result
     }
 
     // ===== Batch Operations (grpc_batches.rs) =====

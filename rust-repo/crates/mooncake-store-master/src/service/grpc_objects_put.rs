@@ -320,7 +320,6 @@ impl MasterServiceImpl {
             client_id,
             request_replica_type_from_i32(req.replica_type)?,
         )?;
-        metrics::PUT_END_REQUESTS.inc();
         Ok(Response::new(proto::PutEndResponse {}))
     }
 

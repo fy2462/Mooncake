@@ -32,9 +32,12 @@ use crate::admin_http::{AdminRuntimeState, admin_router};
 use axum::{Router, routing::get};
 use lazy_static::lazy_static;
 use prometheus::{
-    Encoder, Histogram, IntCounter, IntGauge, TextEncoder, core::Collector, register_histogram,
+    Encoder, Histogram, IntCounter, IntGauge, IntGaugeVec, TextEncoder, core::Collector,
+    register_histogram, register_int_gauge_vec,
 };
+use std::collections::{HashMap, HashSet};
 use std::net::SocketAddr;
+use std::sync::Mutex;
 
 mod batch;
 mod cache;
@@ -164,6 +167,18 @@ lazy_static! {
         "total memory capacity bytes"
     )
     .unwrap();
+    pub static ref SEGMENT_ALLOCATED_MEM_SIZE: IntGaugeVec = register_int_gauge_vec!(
+        "mooncake_store_segment_allocated_mem_bytes",
+        "allocated memory bytes by segment",
+        &["segment"]
+    )
+    .unwrap();
+    pub static ref SEGMENT_TOTAL_MEM_CAPACITY: IntGaugeVec = register_int_gauge_vec!(
+        "mooncake_store_segment_total_mem_capacity_bytes",
+        "total memory capacity bytes by segment",
+        &["segment"]
+    )
+    .unwrap();
     pub static ref ALLOCATED_FILE_SIZE: IntGauge = IntGauge::new(
         "mooncake_store_allocated_file_bytes",
         "total allocated file bytes"
@@ -203,6 +218,47 @@ lazy_static! {
         "current bytes retained by discarded PutStart staging replicas"
     )
     .unwrap();
+}
+
+lazy_static! {
+    static ref MEMORY_SEGMENT_LABELS: Mutex<HashSet<String>> = Mutex::new(HashSet::new());
+}
+
+/// Rebuild Memory gauges from the authoritative object, topology, and allocator state.
+pub(crate) fn sync_memory_metrics(state: &crate::service::state::MasterState) {
+    let mut labels = MEMORY_SEGMENT_LABELS.lock().unwrap();
+    let allocator = state.allocator.read();
+    let (capacity, allocated) = allocator.usage_totals();
+    ALLOCATED_MEM_SIZE.set(allocated.min(i64::MAX as u64) as i64);
+    TOTAL_MEM_CAPACITY.set(capacity.min(i64::MAX as u64) as i64);
+    KEY_COUNT.set(state.objects.len().min(i64::MAX as usize) as i64);
+
+    let mut by_name = HashMap::<String, (u64, u64)>::new();
+    for entry in state.segments.iter() {
+        let name = entry.segment.name.clone();
+        let used = allocator
+            .used_bytes(&entry.segment.id)
+            .unwrap_or(entry.used);
+        let totals = by_name.entry(name).or_default();
+        totals.0 = totals.0.saturating_add(used);
+        totals.1 = totals.1.saturating_add(entry.segment.size);
+    }
+    let current = by_name.keys().cloned().collect::<HashSet<_>>();
+    for (name, (used, capacity)) in by_name {
+        SEGMENT_ALLOCATED_MEM_SIZE
+            .with_label_values(&[&name])
+            .set(used.min(i64::MAX as u64) as i64);
+        SEGMENT_TOTAL_MEM_CAPACITY
+            .with_label_values(&[&name])
+            .set(capacity.min(i64::MAX as u64) as i64);
+    }
+    drop(allocator);
+
+    for stale in labels.difference(&current) {
+        let _ = SEGMENT_ALLOCATED_MEM_SIZE.remove_label_values(&[stale]);
+        let _ = SEGMENT_TOTAL_MEM_CAPACITY.remove_label_values(&[stale]);
+    }
+    *labels = current;
 }
 
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -277,6 +333,13 @@ pub struct MasterMetricSnapshot {
     pub put_start_discard_count: u64,
     pub put_start_release_count: u64,
     pub put_start_discarded_staging_size: i64,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct SegmentMemoryMetricSnapshot {
+    pub allocated_mem_size: i64,
+    pub total_mem_capacity: i64,
+    pub used_ratio: f64,
 }
 
 fn zero_safe_ratio(allocated: i64, capacity: i64) -> f64 {
@@ -363,6 +426,22 @@ pub fn master_metric_snapshot() -> MasterMetricSnapshot {
         put_start_discard_count: PUT_START_DISCARD_COUNT.get(),
         put_start_release_count: PUT_START_RELEASE_COUNT.get(),
         put_start_discarded_staging_size: PUT_START_DISCARDED_STAGING_BYTES.get(),
+    }
+}
+
+pub fn segment_memory_metric_snapshot(segment: &str) -> SegmentMemoryMetricSnapshot {
+    let allocated_mem_size = SEGMENT_ALLOCATED_MEM_SIZE
+        .get_metric_with_label_values(&[segment])
+        .map(|gauge| gauge.get())
+        .unwrap_or(0);
+    let total_mem_capacity = SEGMENT_TOTAL_MEM_CAPACITY
+        .get_metric_with_label_values(&[segment])
+        .map(|gauge| gauge.get())
+        .unwrap_or(0);
+    SegmentMemoryMetricSnapshot {
+        allocated_mem_size,
+        total_mem_capacity,
+        used_ratio: zero_safe_ratio(allocated_mem_size, total_mem_capacity),
     }
 }
 
@@ -743,6 +822,10 @@ fn register_gauge(g: &IntGauge) {
     let _ = prometheus::register(Box::new(g.clone()));
 }
 
+fn register_gauge_vec(g: &IntGaugeVec) {
+    let _ = prometheus::register(Box::new(g.clone()));
+}
+
 /// Re-register a histogram with Prometheus.
 fn register_histogram_metric(histogram: &Histogram) {
     let _ = prometheus::register(Box::new(histogram.clone()));
@@ -840,6 +923,8 @@ pub fn register_metrics() {
     register_gauge(&ACTIVE_CLIENTS);
     register_gauge(&ALLOCATED_MEM_SIZE);
     register_gauge(&TOTAL_MEM_CAPACITY);
+    register_gauge_vec(&SEGMENT_ALLOCATED_MEM_SIZE);
+    register_gauge_vec(&SEGMENT_TOTAL_MEM_CAPACITY);
     register_gauge(&ALLOCATED_FILE_SIZE);
     register_gauge(&TOTAL_FILE_CAPACITY);
     register_counter(&EVICTION_ATTEMPTS);

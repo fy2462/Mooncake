@@ -1366,6 +1366,7 @@ pub(crate) fn restore_loaded_snapshot_state(
             },
         );
     }
+    metrics::sync_memory_metrics(state);
     Ok(())
 }
 

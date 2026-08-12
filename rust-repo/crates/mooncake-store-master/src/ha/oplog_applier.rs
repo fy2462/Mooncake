@@ -119,6 +119,7 @@ impl OpLogApplier {
         if entry.seq != expected || !Self::apply_one(&self.state, &entry.payload) {
             return 0;
         }
+        crate::metrics::sync_memory_metrics(&self.state);
         self.missing_sequence_first_seen.lock().remove(&expected);
         self.expected_seq.store(expected + 1, Ordering::Release);
         let mut applied = 1;
@@ -131,6 +132,7 @@ impl OpLogApplier {
             if !Self::apply_one(&self.state, &pending.payload) {
                 break;
             }
+            crate::metrics::sync_memory_metrics(&self.state);
             self.missing_sequence_first_seen.lock().remove(&next);
             self.expected_seq.store(next + 1, Ordering::Release);
             applied += 1;

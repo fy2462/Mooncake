@@ -8,6 +8,7 @@ use mooncake_store_master::{MasterRuntimeConfig, MasterServiceImpl};
 use prometheus::{Encoder, TextEncoder};
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::Duration;
 use tonic::Request;
 use uuid::Uuid;
 
@@ -101,6 +102,372 @@ fn batch_matrix(snapshot: &metrics::MasterMetricSnapshot, operation: &str) -> [u
             snapshot.batch_put_revoke_failed_items,
         ],
         _ => panic!("unknown batch metric operation: {operation}"),
+    }
+}
+
+fn assert_basic_memory_metrics(segment: &str, keys: i64, allocated: i64, capacity: i64) {
+    let snapshot = metrics::master_metric_snapshot();
+    assert_eq!(snapshot.key_count, keys);
+    assert_eq!(snapshot.allocated_mem_size, allocated);
+    assert_eq!(snapshot.total_mem_capacity, capacity);
+    assert_eq!(
+        snapshot.global_mem_used_ratio,
+        if capacity == 0 {
+            0.0
+        } else {
+            allocated as f64 / capacity as f64
+        }
+    );
+    let segment_snapshot = metrics::segment_memory_metric_snapshot(segment);
+    assert_eq!(segment_snapshot.allocated_mem_size, allocated);
+    assert_eq!(segment_snapshot.total_mem_capacity, capacity);
+    assert_eq!(
+        segment_snapshot.used_ratio,
+        if capacity == 0 {
+            0.0
+        } else {
+            allocated as f64 / capacity as f64
+        }
+    );
+}
+
+#[test]
+fn cpp_parity_master_metrics_test_cpp_mastermetricstest_basicrequesttest() {
+    const CHILD_MARKER: &str = "MOONCAKE_BASIC_REQUEST_METRICS_CHILD";
+    const TEST_NAME: &str = "cpp_parity_master_metrics_test_cpp_mastermetricstest_basicrequesttest";
+    if std::env::var_os(CHILD_MARKER).is_none() {
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .arg(TEST_NAME)
+            .arg("--exact")
+            .arg("--test-threads=1")
+            .env(CHILD_MARKER, "1")
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "fresh basic-request metrics child failed\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        return;
+    }
+
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    runtime.block_on(async {
+        const SEGMENT: &str = "test_segment";
+        const SEGMENT_SIZE: u64 = 16 * 1024 * 1024;
+        const KEY: &str = "test_key";
+        const VALUE_SIZE: u64 = 1024;
+        let service = MasterServiceImpl::new_with_runtime_config(
+            None,
+            None,
+            MasterRuntimeConfig {
+                lease_ttl: Duration::ZERO,
+                ..Default::default()
+            },
+        );
+        let client_id = Uuid::new_v4();
+
+        let mounted = MasterService::mount_segment(
+            &service,
+            Request::new(proto::MountSegmentRequest {
+                client_id: Some(proto_uuid(client_id)),
+                segment_name: SEGMENT.into(),
+                size: SEGMENT_SIZE,
+                base_addr: 0x3_0000_0000,
+                te_endpoint: String::new(),
+                protocol: String::new(),
+                host_id: String::new(),
+            }),
+        )
+        .await
+        .unwrap()
+        .into_inner();
+        let segment_id = mounted.segment_id.expect("mounted segment id");
+        assert_basic_memory_metrics(SEGMENT, 0, 0, SEGMENT_SIZE as i64);
+        let snapshot = metrics::master_metric_snapshot();
+        assert_eq!(
+            (
+                snapshot.mount_segment_requests,
+                snapshot.mount_segment_failures
+            ),
+            (1, 0)
+        );
+
+        MasterService::put_start(
+            &service,
+            Request::new(proto::PutStartRequest {
+                client_id: Some(proto_uuid(client_id)),
+                key: KEY.into(),
+                slice_length: VALUE_SIZE,
+                config: Some(replicate_config(SEGMENT)),
+                tenant_id: String::new(),
+            }),
+        )
+        .await
+        .unwrap();
+        assert_basic_memory_metrics(SEGMENT, 1, VALUE_SIZE as i64, SEGMENT_SIZE as i64);
+        let snapshot = metrics::master_metric_snapshot();
+        assert_eq!(
+            (snapshot.put_start_requests, snapshot.put_start_failures),
+            (1, 0)
+        );
+
+        MasterService::put_revoke(
+            &service,
+            Request::new(proto::PutRevokeRequest {
+                client_id: Some(proto_uuid(client_id)),
+                key: KEY.into(),
+                replica_type: proto::replica_descriptor::ReplicaType::Memory as i32,
+                tenant_id: String::new(),
+            }),
+        )
+        .await
+        .unwrap();
+        assert_basic_memory_metrics(SEGMENT, 0, 0, SEGMENT_SIZE as i64);
+        let snapshot = metrics::master_metric_snapshot();
+        assert_eq!(
+            (snapshot.put_revoke_requests, snapshot.put_revoke_failures),
+            (1, 0)
+        );
+
+        for generation in 0..3 {
+            MasterService::put_start(
+                &service,
+                Request::new(proto::PutStartRequest {
+                    client_id: Some(proto_uuid(client_id)),
+                    key: KEY.into(),
+                    slice_length: VALUE_SIZE,
+                    config: Some(replicate_config(SEGMENT)),
+                    tenant_id: String::new(),
+                }),
+            )
+            .await
+            .unwrap();
+            MasterService::put_end(
+                &service,
+                Request::new(proto::PutEndRequest {
+                    client_id: Some(proto_uuid(client_id)),
+                    key: KEY.into(),
+                    replica_type: proto::replica_descriptor::ReplicaType::Memory as i32,
+                    tenant_id: String::new(),
+                }),
+            )
+            .await
+            .unwrap();
+            assert_basic_memory_metrics(SEGMENT, 1, VALUE_SIZE as i64, SEGMENT_SIZE as i64);
+
+            match generation {
+                0 => {
+                    let snapshot = metrics::master_metric_snapshot();
+                    assert_eq!(
+                        (snapshot.put_start_requests, snapshot.put_start_failures),
+                        (2, 0)
+                    );
+                    assert_eq!(
+                        (snapshot.put_end_requests, snapshot.put_end_failures),
+                        (1, 0)
+                    );
+
+                    let exists = MasterService::exist_key(
+                        &service,
+                        Request::new(proto::ExistKeyRequest {
+                            key: KEY.into(),
+                            tenant_id: String::new(),
+                        }),
+                    )
+                    .await
+                    .unwrap()
+                    .into_inner();
+                    assert!(exists.exists);
+                    let replicas = MasterService::get_replica_list(
+                        &service,
+                        Request::new(proto::GetReplicaListRequest {
+                            key: KEY.into(),
+                            tenant_id: String::new(),
+                        }),
+                    )
+                    .await
+                    .unwrap()
+                    .into_inner();
+                    assert_eq!(replicas.replicas.len(), 1);
+                    let snapshot = metrics::master_metric_snapshot();
+                    assert_eq!(
+                        (snapshot.exist_key_requests, snapshot.exist_key_failures),
+                        (1, 0)
+                    );
+                    assert_eq!(
+                        (
+                            snapshot.get_replica_list_requests,
+                            snapshot.get_replica_list_failures
+                        ),
+                        (1, 0)
+                    );
+
+                    MasterService::remove(
+                        &service,
+                        Request::new(proto::RemoveRequest {
+                            key: KEY.into(),
+                            force: false,
+                            tenant_id: String::new(),
+                        }),
+                    )
+                    .await
+                    .unwrap();
+                    assert_basic_memory_metrics(SEGMENT, 0, 0, SEGMENT_SIZE as i64);
+                    let snapshot = metrics::master_metric_snapshot();
+                    assert_eq!((snapshot.remove_requests, snapshot.remove_failures), (1, 0));
+                }
+                1 => {
+                    let removed = MasterService::remove_all(
+                        &service,
+                        Request::new(proto::RemoveAllRequest {
+                            force: true,
+                            tenant_id: String::new(),
+                        }),
+                    )
+                    .await
+                    .unwrap()
+                    .into_inner();
+                    assert_eq!(removed.removed_count, 1);
+                    assert_basic_memory_metrics(SEGMENT, 0, 0, SEGMENT_SIZE as i64);
+                    let snapshot = metrics::master_metric_snapshot();
+                    assert_eq!(
+                        (snapshot.remove_all_requests, snapshot.remove_all_failures),
+                        (1, 0)
+                    );
+                }
+                2 => {
+                    MasterService::unmount_segment(
+                        &service,
+                        Request::new(proto::UnmountSegmentRequest {
+                            segment_id: Some(segment_id.clone()),
+                            client_id: Some(proto_uuid(client_id)),
+                        }),
+                    )
+                    .await
+                    .unwrap();
+                    assert_basic_memory_metrics(SEGMENT, 0, 0, 0);
+                    assert_eq!(
+                        metrics::segment_memory_metric_snapshot(""),
+                        metrics::SegmentMemoryMetricSnapshot::default()
+                    );
+                    assert_eq!(
+                        metrics::segment_memory_metric_snapshot("xxxxxx_segment"),
+                        metrics::SegmentMemoryMetricSnapshot::default()
+                    );
+                    let snapshot = metrics::master_metric_snapshot();
+                    assert_eq!(
+                        (
+                            snapshot.unmount_segment_requests,
+                            snapshot.unmount_segment_failures
+                        ),
+                        (1, 0)
+                    );
+                }
+                _ => unreachable!(),
+            }
+        }
+    });
+}
+
+#[tokio::test]
+async fn non_scalar_rpc_paths_do_not_contaminate_scalar_request_counters() {
+    let _guard = METRICS_TEST_LOCK.lock().unwrap();
+    let service = MasterServiceImpl::default();
+    let before = metrics::master_metric_snapshot();
+
+    MasterService::batch_get_replica_list(
+        &service,
+        Request::new(proto::BatchGetReplicaListRequest {
+            keys: vec!["missing".into()],
+            tenant_id: String::new(),
+        }),
+    )
+    .await
+    .unwrap();
+    MasterService::get_replica_list_by_regex(
+        &service,
+        Request::new(proto::GetReplicaListByRegexRequest {
+            key_regex: ".*".into(),
+            tenant_id: String::new(),
+        }),
+    )
+    .await
+    .unwrap();
+    MasterService::remove_by_regex(
+        &service,
+        Request::new(proto::RemoveByRegexRequest {
+            pattern: ".*".into(),
+            force: true,
+            tenant_id: String::new(),
+        }),
+    )
+    .await
+    .unwrap();
+
+    let after = metrics::master_metric_snapshot();
+    assert_eq!(
+        after.get_replica_list_requests,
+        before.get_replica_list_requests
+    );
+    assert_eq!(after.remove_requests, before.remove_requests);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn concurrent_memory_metric_publications_converge_after_unmounts() {
+    let _guard = METRICS_TEST_LOCK.lock().unwrap();
+    let service = std::sync::Arc::new(MasterServiceImpl::default());
+    let mut tasks = Vec::new();
+    for index in 0..32u64 {
+        let service = service.clone();
+        tasks.push(tokio::spawn(async move {
+            let client_id = Uuid::new_v4();
+            let segment_name = format!("concurrent-metrics-{index}");
+            let mounted = MasterService::mount_segment(
+                service.as_ref(),
+                Request::new(proto::MountSegmentRequest {
+                    client_id: Some(proto_uuid(client_id)),
+                    segment_name: segment_name.clone(),
+                    size: 4096,
+                    base_addr: 0x5_0000_0000 + index * 0x1_0000,
+                    te_endpoint: String::new(),
+                    protocol: String::new(),
+                    host_id: String::new(),
+                }),
+            )
+            .await
+            .unwrap()
+            .into_inner();
+            tokio::task::yield_now().await;
+            MasterService::unmount_segment(
+                service.as_ref(),
+                Request::new(proto::UnmountSegmentRequest {
+                    segment_id: mounted.segment_id,
+                    client_id: Some(proto_uuid(client_id)),
+                }),
+            )
+            .await
+            .unwrap();
+            segment_name
+        }));
+    }
+    let mut names = Vec::new();
+    for task in tasks {
+        names.push(task.await.unwrap());
+    }
+
+    let snapshot = metrics::master_metric_snapshot();
+    assert_eq!(snapshot.allocated_mem_size, 0);
+    assert_eq!(snapshot.total_mem_capacity, 0);
+    for name in names {
+        assert_eq!(
+            metrics::segment_memory_metric_snapshot(&name),
+            metrics::SegmentMemoryMetricSnapshot::default()
+        );
     }
 }
 
