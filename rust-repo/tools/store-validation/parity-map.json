@@ -9473,13 +9473,18 @@
     "file": "ha/leadership/high_availability_test.cpp",
     "test": "HighAvailabilityTest.EtcdBasicOperations"
    },
-   "reason": "Rust production uses etcd leases, election, and oplog calls, but no discoverable real-etcd Rust test asserts binary KV values, keepalive cancellation, revoke deletion, deletion watch, and explicit key-watch cancellation.",
+   "reason": "cpp_parity_high_availability_test_etcd_basic_operations uses etcd-client, the same production etcd dependency, against a unique live-etcd namespace. It creates leased keys by a version-zero transaction and verifies exact values and creation revisions for the C++ fixture's actual bytes (whose std::string literals truncate at their first NUL), then strengthens that fixture with a genuinely embedded/leading/trailing-NUL key and value. An acknowledged keepalive preserves a two-second lease for six seconds and aborting its owner task reports cancellation; explicit revoke removes its key; an established watch remains blocked while its lease is kept alive then observes the exact deletion after keepalive cancellation and expiry; and explicit watcher cancellation yields a canceled response within two seconds.",
    "review": {
     "oracle": "high_availability_test.cpp EtcdBasicOperations and EtcdHelper lease/KV/watch calls",
     "reviewed": true
    },
-   "rust": [],
-   "status": "missing"
+   "rust": [
+    {
+     "file": "mooncake-store-master/tests/test_etcd_oplog_live.rs",
+     "test": "cpp_parity_high_availability_test_etcd_basic_operations"
+    }
+   ],
+   "status": "covered"
   },
   {
    "behavior": "An empty view becomes an acquired leader session; renew preserves its address/version through TTL, a stable 200-ms wait times out, explicit release removes the view, and a different address can reacquire.",

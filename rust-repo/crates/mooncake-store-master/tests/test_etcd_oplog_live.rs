@@ -1,3 +1,4 @@
+use etcd_client::{Compare, CompareOp, PutOptions, Txn, TxnOp, WatchOptions};
 use mooncake_store_master::ha::{LeaderCoordinator, LeaderRole, OpLogRecord};
 use mooncake_store_master::oplog::{EtcdOpLogStore, OpLogManager, OpLogStore};
 use std::sync::Arc;
@@ -116,6 +117,178 @@ impl LiveEtcdFixture {
             .await
             .expect("plant matching latest pointer");
     }
+}
+
+async fn create_binary_key_with_lease(
+    client: &mut etcd_client::Client,
+    key: &[u8],
+    value: &[u8],
+    lease_id: i64,
+) -> i64 {
+    let response = client
+        .txn(
+            Txn::new()
+                .when([Compare::version(key.to_vec(), CompareOp::Equal, 0)])
+                .and_then([TxnOp::put(
+                    key.to_vec(),
+                    value.to_vec(),
+                    Some(PutOptions::new().with_lease(lease_id)),
+                )]),
+        )
+        .await
+        .unwrap();
+    assert!(response.succeeded(), "leased binary key is created once");
+    response.header().unwrap().revision()
+}
+
+async fn start_live_keepalive(
+    client: &mut etcd_client::Client,
+    lease_id: i64,
+) -> tokio::task::JoinHandle<()> {
+    let (mut keeper, mut stream) = client.lease_keep_alive(lease_id).await.unwrap();
+    let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
+    let task = tokio::spawn(async move {
+        let mut ready_tx = Some(ready_tx);
+        loop {
+            keeper.keep_alive().await.unwrap();
+            let response = tokio::time::timeout(Duration::from_secs(1), stream.message())
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap();
+            assert_eq!(response.id(), lease_id);
+            assert!(response.ttl() > 0);
+            if let Some(ready_tx) = ready_tx.take() {
+                ready_tx.send(()).unwrap();
+            }
+            tokio::time::sleep(Duration::from_millis(500)).await;
+        }
+    });
+    ready_rx.await.unwrap();
+    task
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn cpp_parity_high_availability_test_etcd_basic_operations() {
+    if !live_etcd_enabled() {
+        eprintln!("skipping live etcd oplog e2e; set MOONCAKE_ETCD_OPLOG_E2E=1 to enable");
+        return;
+    }
+
+    let namespace = format!("ha-etcd-basic-{}", Uuid::new_v4().simple());
+    let prefix = format!("mooncake-store/test/{namespace}/").into_bytes();
+    let mut client = etcd_client::Client::connect([live_etcd_endpoint()], None)
+        .await
+        .unwrap();
+    let binary_cases: Vec<(Vec<u8>, Vec<u8>)> = vec![
+        (
+            [prefix.as_slice(), b"test_key1"].concat(),
+            b"test_value1".to_vec(),
+        ),
+        ([prefix.as_slice(), b"test_"].concat(), b"test_".to_vec()),
+        (
+            [prefix.as_slice(), b"test_key3"].concat(),
+            b"test_value3".to_vec(),
+        ),
+        (prefix.clone(), Vec::new()),
+        (
+            [prefix.as_slice(), b"real\0\0binary\0key"].concat(),
+            b"\0real\0\0binary\0value\0".to_vec(),
+        ),
+    ];
+    for (key, value) in binary_cases {
+        let lease_id = client.lease_grant(10, None).await.unwrap().id();
+        let create_revision =
+            create_binary_key_with_lease(&mut client, &key, &value, lease_id).await;
+        let response = client.get(key, None).await.unwrap();
+        let kv = response.kvs().first().unwrap();
+        assert_eq!(kv.value(), value);
+        assert_eq!(kv.mod_revision(), create_revision);
+        client.lease_revoke(lease_id).await.unwrap();
+    }
+
+    let keepalive_lease = client.lease_grant(2, None).await.unwrap().id();
+    let keepalive_task = start_live_keepalive(&mut client, keepalive_lease).await;
+    tokio::time::sleep(Duration::from_secs(6)).await;
+    let keepalive_key = [prefix.as_slice(), b"keep_alive_key"].concat();
+    create_binary_key_with_lease(
+        &mut client,
+        &keepalive_key,
+        b"keep_alive_value",
+        keepalive_lease,
+    )
+    .await;
+    assert_eq!(
+        client.get(keepalive_key.clone(), None).await.unwrap().kvs()[0].value(),
+        b"keep_alive_value"
+    );
+    keepalive_task.abort();
+    assert!(keepalive_task.await.unwrap_err().is_cancelled());
+    client.lease_revoke(keepalive_lease).await.unwrap();
+
+    let revoke_lease = client.lease_grant(10, None).await.unwrap().id();
+    let revoke_key = [prefix.as_slice(), b"revoke_key"].concat();
+    create_binary_key_with_lease(&mut client, &revoke_key, b"revoke_value", revoke_lease).await;
+    client.lease_revoke(revoke_lease).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert!(
+        client
+            .get(revoke_key.clone(), None)
+            .await
+            .unwrap()
+            .kvs()
+            .is_empty()
+    );
+
+    let watched_lease = client.lease_grant(2, None).await.unwrap().id();
+    let watched_key = [prefix.as_slice(), b"watch_key"].concat();
+    create_binary_key_with_lease(&mut client, &watched_key, b"watch_value", watched_lease).await;
+    let watched_keepalive = start_live_keepalive(&mut client, watched_lease).await;
+    let (_watcher, mut watch_stream) = client.watch(watched_key.clone(), None).await.unwrap();
+    assert!(
+        tokio::time::timeout(Duration::from_millis(300), watch_stream.message())
+            .await
+            .is_err()
+    );
+    watched_keepalive.abort();
+    assert!(watched_keepalive.await.unwrap_err().is_cancelled());
+    let deleted = tokio::time::timeout(Duration::from_secs(6), async {
+        loop {
+            let response = watch_stream.message().await.unwrap().unwrap();
+            if response.events().iter().any(|event| {
+                event.event_type() == etcd_client::EventType::Delete
+                    && event.kv().is_some_and(|kv| kv.key() == watched_key)
+            }) {
+                break;
+            }
+        }
+    })
+    .await;
+    assert!(
+        deleted.is_ok(),
+        "watch completes after keepalive cancellation expires the key"
+    );
+
+    let cancel_lease = client.lease_grant(10, None).await.unwrap().id();
+    let cancel_key = [prefix.as_slice(), b"watch_key2"].concat();
+    create_binary_key_with_lease(&mut client, &cancel_key, b"watch_value2", cancel_lease).await;
+    let (mut watcher, mut cancel_stream) = client
+        .watch(cancel_key.clone(), Some(WatchOptions::new()))
+        .await
+        .unwrap();
+    watcher.cancel().await.unwrap();
+    let canceled = tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            let response = cancel_stream.message().await.unwrap().unwrap();
+            if response.canceled() {
+                break response;
+            }
+        }
+    })
+    .await
+    .expect("explicit watch cancellation completes within two seconds");
+    assert!(canceled.canceled());
+    client.lease_revoke(cancel_lease).await.unwrap();
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
