@@ -30,10 +30,42 @@ async fn start_master_with_config(config: MasterRuntimeConfig) -> (String, onesh
     (address.to_string(), shutdown_tx)
 }
 
-async fn create_ipv6_tcp_client(master: &str) -> MooncakeClient {
-    let probe = tokio::net::TcpListener::bind("[::1]:0")
-        .await
-        .expect("IPv6 loopback is required for this parity fixture");
+async fn create_ipv6_tcp_client_on(master: &str, host: &str) -> MooncakeClient {
+    let endpoint = host.trim();
+    let (scoped_host, requested_port) = if let Some(bracketed) = endpoint.strip_prefix('[') {
+        let closing = bracketed
+            .find(']')
+            .expect("bracketed IPv6 endpoint must contain a closing bracket");
+        let scoped_host = &bracketed[..closing];
+        let suffix = &bracketed[closing + 1..];
+        let port = suffix
+            .strip_prefix(':')
+            .expect("bracketed IPv6 endpoint must include :port")
+            .parse::<u16>()
+            .expect("bracketed IPv6 endpoint port must be an unsigned integer");
+        (scoped_host, port)
+    } else {
+        (endpoint, 0)
+    };
+    let (address, scope_id) = match scoped_host.split_once('%') {
+        Some((address, interface)) => {
+            let interface = std::ffi::CString::new(interface).unwrap();
+            // SAFETY: interface is a valid, NUL-terminated C string for the
+            // duration of this lookup.
+            let scope_id = unsafe { libc::if_nametoindex(interface.as_ptr()) };
+            assert_ne!(scope_id, 0, "configured IPv6 scope interface must exist");
+            (address.parse::<std::net::Ipv6Addr>().unwrap(), scope_id)
+        }
+        None => (scoped_host.parse::<std::net::Ipv6Addr>().unwrap(), 0),
+    };
+    let probe = tokio::net::TcpListener::bind(std::net::SocketAddrV6::new(
+        address,
+        requested_port,
+        0,
+        scope_id,
+    ))
+    .await
+    .expect("configured IPv6 endpoint is required for this parity fixture");
     let local_host = probe.local_addr().unwrap().to_string();
     drop(probe);
     MooncakeClient::create(
@@ -46,7 +78,11 @@ async fn create_ipv6_tcp_client(master: &str) -> MooncakeClient {
         16 * 1024 * 1024,
     )
     .await
-    .expect("create real client on IPv6 loopback")
+    .expect("create real client on configured IPv6 endpoint")
+}
+
+async fn create_ipv6_tcp_client(master: &str) -> MooncakeClient {
+    create_ipv6_tcp_client_on(master, "::1").await
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -112,6 +148,49 @@ async fn cpp_parity_ipv6_batch_put_get_exact_ten_payloads() {
         assert_eq!(actual, expected);
     }
 
+    client.tear_down_all().await.unwrap();
+    let _ = shutdown.send(());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn cpp_parity_scoped_link_local_ipv6_put_get_roundtrip() {
+    if std::env::var("MC_USE_IPV6").as_deref() != Ok("1") {
+        eprintln!("skipping scoped link-local IPv6 parity; MC_USE_IPV6 must equal 1");
+        return;
+    }
+    let Ok(link_local_host) = std::env::var("SERVER_ADDRESS_LL") else {
+        eprintln!(
+            "skipping scoped link-local IPv6 parity; SERVER_ADDRESS_LL must name a configured address such as fe80::1%eth0"
+        );
+        return;
+    };
+    if link_local_host.trim().is_empty() {
+        eprintln!(
+            "skipping scoped link-local IPv6 parity; SERVER_ADDRESS_LL must name a configured address such as fe80::1%eth0"
+        );
+        return;
+    }
+
+    let (master, shutdown) = start_master().await;
+    let mut client = create_ipv6_tcp_client_on(&master, &link_local_host).await;
+    let key = "ipv6_linklocal_test_key";
+    let payload = b"Hello, Link-Local IPv6!";
+    client
+        .put(
+            key,
+            payload,
+            Some(ReplicateConfig {
+                replica_num: 1,
+                ..Default::default()
+            }),
+        )
+        .await
+        .unwrap();
+    let fetched = client.get(key).await.unwrap();
+    assert_eq!(fetched.len(), payload.len());
+    assert_eq!(fetched, payload);
+
+    let _ = client.remove(key, false).await;
     client.tear_down_all().await.unwrap();
     let _ = shutdown.send(());
 }

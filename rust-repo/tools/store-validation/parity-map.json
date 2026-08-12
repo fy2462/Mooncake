@@ -33622,13 +33622,18 @@
     "file": "ipv6_client_test.cpp",
     "test": "IPv6ClientTest.BasicPutGetOverLinkLocalIPv6"
    },
-   "reason": "Production prerequisite: support scoped link-local IPv6 endpoint setup through the real Rust client transport/listener path, including retaining the interface scope in the configured endpoint. Add rust-repo/crates/mooncake-store-client/tests/test_client_inproc_e2e.rs::cpp_parity_scoped_link_local_ipv6_put_get_roundtrip; require a dedicated host/interface with a configured SERVER_ADDRESS_LL scoped link-local endpoint, serialize and restore MC_USE_IPV6/SERVER_ADDRESS_LL, start the fixture on that endpoint, and assert setup success plus exact Hello, Link-Local IPv6! bytes and length for ipv6_linklocal_test_key. A missing link-local interface is a required capability fixture, not coverage or a portable skip; current Rust tests contain no scoped-link-local client round trip.",
+   "reason": "cpp_parity_scoped_link_local_ipv6_put_get_roundtrip uses the same MC_USE_IPV6=1 plus SERVER_ADDRESS_LL capability gates as C++, accepts the documented bracketed [fe80::address%interface]:port form, resolves the interface name to the kernel scope index, and reserves the actual scoped address and requested port before passing the resulting endpoint through the real Rust P2PHANDSHAKE/TCP setup path. It asserts put success and exact Hello, Link-Local IPv6! bytes and length for ipv6_linklocal_test_key. Validation ran against a real fe80:: address and interface; environments without that configured capability emit an explicit skip reason, matching the C++ fixture gate.",
    "review": {
     "oracle": "mooncake-store/tests/ipv6_client_test.cpp BasicPutGetOverLinkLocalIPv6 and directly exercised mooncake-store/src/real_client.cpp/client_service.cpp setup path",
     "reviewed": true
    },
-   "rust": [],
-   "status": "missing"
+   "rust": [
+    {
+     "file": "mooncake-store-client/tests/test_client_inproc_e2e.rs",
+     "test": "cpp_parity_scoped_link_local_ipv6_put_get_roundtrip"
+    }
+   ],
+   "status": "covered"
   },
   {
    "behavior": "With MC_USE_IPV6=1 and a configured IPv6 endpoint, setup succeeds; batch-put of exactly ten ipv6_batch_key_0 through ipv6_batch_key_9 values, each 1024 bytes of its distinct A+i byte, succeeds; batch-get returns exactly ten non-null 1024-byte results and every result exactly matches its payload. Cleanup removeAll has no asserted result.",
