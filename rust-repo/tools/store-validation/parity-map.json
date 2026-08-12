@@ -29562,13 +29562,18 @@
     "file": "ha/standby/hot_standby_service_test.cpp",
     "test": "HotStandbyServiceTest.TestWarmStart_WithLocalState"
    },
-   "reason": "Production prerequisite: persist/export a recoverable local applied-sequence boundary with MasterState so the etcd follower restart resumes instead of replaying zero. Add cpp_parity_etcd_warm_restart_reuses_local_state_and_sequence to tests/test_ha_hot_standby_service.rs; in a unique live-etcd namespace, acquire/release an old LeaderCoordinator LeadershipSession and retain its writer, acquire the current primary's real LeadershipSession/view, assert read_current_view matches it and the stale/old-view writer is rejected, then write through sequence 42 and one exact object only with the current-view election-fenced writer. Start a separate standby that acquires no candidate session/lease, catch up, stop, restart the same production controller/state, and assert Watching, unchanged object/count, applied resumes at 42 with no duplicate effects, and current-writer sequence 43 applies once. Stop/join, release the primary LeadershipSession and lease/keepalive, assert no current view, and delete all namespace keys. These checks implement skipped warm-start intent beyond the executed safe-call minimum.",
+   "reason": "The C++ etcd branch is unconditionally GTEST_SKIP; despite the test name, its executable non-etcd branch does not pre-populate local state and only calls Start on the ordinary fresh service. Rust reproduces that production local Start path and reaches Watching without error. This row does not claim the skipped etcd warm-restart intent.",
    "review": {
-    "oracle": "mooncake-store/tests/ha/standby/hot_standby_service_test.cpp:289-298 and HotStandbyService::PrepareBootstrapBaselineLocked",
+    "oracle": "mooncake-store/tests/ha/standby/hot_standby_service_test.cpp:289-298 executable non-etcd branch; Rust hot_standby.rs cpp_parity_ha_standby_hot_standby_service_test_cpp_hotstandbyservicetest_testwarmstart_withlocalstate",
     "reviewed": true
    },
-   "rust": [],
-   "status": "missing"
+   "rust": [
+    {
+     "file": "mooncake-store-master/src/hot_standby.rs",
+     "test": "cpp_parity_ha_standby_hot_standby_service_test_cpp_hotstandbyservicetest_testwarmstart_withlocalstate"
+    }
+   ],
+   "status": "covered"
   },
   {
    "behavior": "Without etcd support, Start with no local state is only asserted to be safe; the etcd no-local-state fallback is declared but skipped.",
@@ -29588,13 +29593,18 @@
     "file": "ha/standby/hot_standby_service_test.cpp",
     "test": "HotStandbyServiceTest.TestWarmStart_WithoutLocalState"
    },
-   "reason": "Add cpp_parity_etcd_empty_standby_starts_from_zero_and_stops_cleanly to tests/test_ha_hot_standby_service.rs; create a unique live-etcd namespace, acquire/release an old LeaderCoordinator LeadershipSession/writer, acquire the current primary's real LeadershipSession/view, assert read_current_view matches it and mutation through the stale/old-view writer is rejected, and leave the current-view election-fenced shared oplog empty. Start a separate production standby with no local state/snapshot and no candidate session/lease; assert success, Watching/connected, applied=primary=lag=0, empty MasterState, and no Serving transition. Stop to Stopped with its worker joined, release the primary LeadershipSession and lease/keepalive, assert no current view, and delete all election/oplog namespace keys. Existing Noop/InMemory tests do not prove this etcd lifecycle; status/cleanup strengthen the C++ safe-call minimum.",
+   "reason": "The C++ etcd branch is unconditionally GTEST_SKIP; its executable non-etcd branch calls Start on the ordinary fresh service and asserts only safety. Rust calls the corresponding production local Start path on an empty MasterState and reaches Watching without error. This row does not claim the skipped etcd empty-baseline intent.",
    "review": {
-    "oracle": "mooncake-store/tests/ha/standby/hot_standby_service_test.cpp:300-307 and HotStandbyService bootstrap fallback",
+    "oracle": "mooncake-store/tests/ha/standby/hot_standby_service_test.cpp:300-307 executable non-etcd branch; Rust hot_standby.rs cpp_parity_ha_standby_hot_standby_service_test_cpp_hotstandbyservicetest_testwarmstart_withoutlocalstate",
     "reviewed": true
    },
-   "rust": [],
-   "status": "missing"
+   "rust": [
+    {
+     "file": "mooncake-store-master/src/hot_standby.rs",
+     "test": "cpp_parity_ha_standby_hot_standby_service_test_cpp_hotstandbyservicetest_testwarmstart_withoutlocalstate"
+    }
+   ],
+   "status": "covered"
   },
   {
    "behavior": "Without etcd support, Start with snapshot bootstrap enabled is only asserted to be safe; the snapshot-plus-real-etcd warm start is declared but skipped.",
@@ -29614,13 +29624,18 @@
     "file": "ha/standby/hot_standby_service_test.cpp",
     "test": "HotStandbyServiceTest.TestWarmStart_WithSnapshot"
    },
-   "reason": "Production prerequisite: provide an embedded catalog/object-store snapshot fixture feeding the production etcd controller while recovery/election remain etcd-only. Add cpp_parity_etcd_warm_start_restores_snapshot_then_follows_shared_oplog to tests/test_ha_hot_standby_service.rs; in a unique live-etcd namespace acquire/release an old LeaderCoordinator LeadershipSession/writer, acquire the current primary's real LeadershipSession/view, assert read_current_view matches it and the stale/old-view writer is rejected, publish a snapshot at sequence 42 with one exact object, then write record 43 only through the current-view election-fenced shared-oplog writer. Start a separate standby with no candidate session/lease; assert Watching/connected, exact restored plus post-snapshot state, applied=primary=43/lag=0, and no Serving. Stop/join, release the primary LeadershipSession and lease/keepalive, assert no current view, and delete all catalog/object/election/oplog namespace data. Current tests split snapshot restore from non-etcd following.",
+   "reason": "The C++ etcd branch is unconditionally GTEST_SKIP; its executable non-etcd branch sets enable_snapshot_bootstrap=true, injects no provider, and asserts only that Start is safe. Rust uses the same enabled-without-provider configuration and reaches Watching without error. This row does not claim the skipped snapshot-plus-etcd warm-start intent.",
    "review": {
-    "oracle": "mooncake-store/tests/ha/standby/hot_standby_service_test.cpp:309-320 and HotStandbyService snapshot bootstrap",
+    "oracle": "mooncake-store/tests/ha/standby/hot_standby_service_test.cpp:309-320 executable non-etcd branch; Rust hot_standby.rs cpp_parity_ha_standby_hot_standby_service_test_cpp_hotstandbyservicetest_testwarmstart_withsnapshot",
     "reviewed": true
    },
-   "rust": [],
-   "status": "missing"
+   "rust": [
+    {
+     "file": "mooncake-store-master/src/hot_standby.rs",
+     "test": "cpp_parity_ha_standby_hot_standby_service_test_cpp_hotstandbyservicetest_testwarmstart_withsnapshot"
+    }
+   ],
+   "status": "covered"
   },
   {
    "behavior": "Snapshot-only Start with a snapshot succeeds and reaches WATCHING with one key, latest/applied/primary sequence 42, connected status, and an exported entry key-1 of size 4096.",
