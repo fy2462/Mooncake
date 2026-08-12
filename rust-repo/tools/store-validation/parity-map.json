@@ -29802,13 +29802,18 @@
     "file": "ha/standby/hot_standby_service_test.cpp",
     "test": "HotStandbyServiceTest.TestStart_SnapshotOnlyRestartRefreshesNewerCatalogSnapshot"
    },
-   "reason": "Production prerequisite: ensure snapshot-only restart clears stale MasterState atomically and add a HotStandbyService metadata-export DTO in hot_standby.rs whose per-entry last_sequence_id is populated from the snapshot baseline descriptor (84 for the replacement snapshot), alongside key and size. Add cpp_parity_snapshot_only_restart_replaces_42_old_with_84_new to src/hot_standby.rs; start with key-old/4096/42, assert Watching/count1/latest42, stop, swap to key-new/8192/84, restart, assert Watching/count1/latest84, then export and assert the sole DTO is key-new/size8192/last_sequence_id84 and key-old is absent before final stop. A global latest accessor alone cannot prove the per-entry sequence oracle.",
+   "reason": "Rust hot_standby.rs::cpp_parity_snapshot_only_restart_replaces_42_old_with_84_new starts the production snapshot-only service from key-old/4096/sequence 42, stops it, swaps the provider to key-new/8192/sequence 84, and restarts the same service. It asserts Watching, exact count and latest sequence before and after restart, then uses the snapshot-only provenance export to prove the sole replacement entry is default-scoped key-new with user key-new, size 8192, and per-entry last_sequence_id 84. The export holds the same baseline-to-MasterState lock order as restore, and rejects oplog-following mode rather than assigning a global replay sequence to individual objects.",
    "review": {
-    "oracle": "mooncake-store/tests/ha/standby/hot_standby_service_test.cpp:350-381 and HotStandbyService snapshot-only restart",
+    "oracle": "mooncake-store/tests/ha/standby/hot_standby_service_test.cpp:350-381; Rust hot_standby.rs cpp_parity_snapshot_only_restart_replaces_42_old_with_84_new and snapshot-only provenance export",
     "reviewed": true
    },
-   "rust": [],
-   "status": "missing"
+   "rust": [
+    {
+     "file": "mooncake-store-master/src/hot_standby.rs",
+     "test": "cpp_parity_snapshot_only_restart_replaces_42_old_with_84_new"
+    }
+   ],
+   "status": "covered"
   },
   {
    "behavior": "When the snapshot provider returns PERSISTENT_FAIL in snapshot-only mode, Start returns that exact error and the standby enters FAILED.",

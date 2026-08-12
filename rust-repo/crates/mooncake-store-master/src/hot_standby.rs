@@ -42,6 +42,15 @@ use tracing::info;
 
 const MAX_STANDBY_RECONNECT_ATTEMPTS: u32 = 3;
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StandbySnapshotMetadata {
+    pub scoped_key: String,
+    pub user_key: String,
+    pub size: u64,
+    pub client_id: uuid::Uuid,
+    pub last_sequence_id: u64,
+}
+
 fn wait_for_notifier_startup(
     notifier: &mut dyn OpLogChangeNotifier,
     timeout: std::time::Duration,
@@ -2384,6 +2393,76 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn cpp_parity_snapshot_only_restart_replaces_42_old_with_84_new() {
+        fn snapshot(sequence: u64, key: &str, size: u64) -> crate::ha::LoadedSnapshot {
+            let client_id = Uuid::from_u128((1_u128 << 64) | 2);
+            let segment = Segment {
+                id: Uuid::new_v4(),
+                name: format!("snapshot-restart:{sequence}"),
+                base: 0,
+                size,
+                te_endpoint: String::new(),
+                protocol: "tcp".into(),
+                host_id: String::new(),
+            };
+            let mut object = snapshot_object(key, &segment, 0, size);
+            object.client_id = client_id;
+            crate::ha::LoadedSnapshot {
+                snapshot_id: format!("snapshot-{sequence}"),
+                snapshot_sequence_id: sequence,
+                allocator_config: None,
+                segments: vec![SegmentEntry {
+                    segment,
+                    used: size,
+                    client_id,
+                    status: crate::proto::SegmentStatus::Active,
+                }],
+                nof_segments: vec![],
+                objects: vec![(TenantId::default().make_scoped_key(key), object)],
+                tasks: vec![],
+                replication_tasks: vec![],
+                graceful_unmounts: vec![],
+                delayed_replica_releases: vec![],
+                local_disk_segments: vec![],
+            }
+        }
+
+        let state = Arc::new(MasterState::empty());
+        let mut service = HotStandbyService::new(
+            state,
+            HotStandbyConfig {
+                enable_snapshot_bootstrap: true,
+                cluster_id: "snapshot-restart-cluster".into(),
+                ..Default::default()
+            },
+        );
+        service.set_snapshot_provider(Box::new(StaticSnapshotProvider {
+            snapshot: snapshot(42, "key-old", 4096),
+        }));
+        service.start().await.unwrap();
+        assert_eq!(service.sync_status().state, StandbyState::Watching);
+        assert_eq!(service.latest_applied_sequence_id(), 42);
+        assert_eq!(service.metadata_count(), 1);
+        service.stop();
+
+        service.set_snapshot_provider(Box::new(StaticSnapshotProvider {
+            snapshot: snapshot(84, "key-new", 8192),
+        }));
+        service.start().await.unwrap();
+
+        assert_eq!(service.sync_status().state, StandbyState::Watching);
+        assert_eq!(service.latest_applied_sequence_id(), 84);
+        assert_eq!(service.metadata_count(), 1);
+        let exported = service.export_snapshot_metadata().unwrap();
+        assert_eq!(exported.len(), 1);
+        assert_eq!(exported[0].scoped_key, "default\0key-new");
+        assert_eq!(exported[0].user_key, "key-new");
+        assert_eq!(exported[0].size, 8192);
+        assert_eq!(exported[0].last_sequence_id, 84);
+        service.stop();
+    }
+
+    #[tokio::test]
     async fn cpp_parity_ha_oplog_ha_recovery_test_cpp_harecoverytest_snapshotthenoplogreplay() {
         let state = Arc::new(MasterState::empty());
         let client_id = Uuid::new_v4();
@@ -3199,6 +3278,7 @@ pub struct HotStandbyService {
     oplog_store: Option<Arc<dyn OpLogStore>>,
     /// Replication loop thread handle.
     replication_thread: Option<std::thread::JoinHandle<()>>,
+    snapshot_baseline_sequence_id: parking_lot::RwLock<u64>,
 }
 
 impl Drop for HotStandbyService {
@@ -3226,6 +3306,7 @@ impl HotStandbyService {
             oplog_applier: None,
             oplog_store: None,
             replication_thread: None,
+            snapshot_baseline_sequence_id: parking_lot::RwLock::new(0),
         }
     }
 
@@ -3271,6 +3352,36 @@ impl HotStandbyService {
             .collect::<Vec<_>>();
         snapshot.sort_by(|left, right| left.0.cmp(&right.0));
         snapshot
+    }
+
+    /// Export per-object snapshot provenance in snapshot-only mode.
+    pub fn export_snapshot_metadata(&self) -> Result<Vec<StandbySnapshotMetadata>, HaError> {
+        if self.config.enable_oplog_following {
+            return Err(HaError::UnavailableInCurrentMode(
+                "per-object snapshot provenance is unavailable after oplog replay".into(),
+            ));
+        }
+        // Restart publishes the baseline while holding this lock across the
+        // MasterState snapshot replacement. Keep the read guard across the
+        // matching state barrier so sequence provenance and objects are one
+        // point-in-time view.
+        let baseline_guard = self.snapshot_baseline_sequence_id.read();
+        let _snapshot_guard = self.state.key_mutations.lock_snapshot();
+        let last_sequence_id = *baseline_guard;
+        let mut snapshot = self
+            .state
+            .objects
+            .iter()
+            .map(|entry| StandbySnapshotMetadata {
+                scoped_key: entry.key().clone(),
+                user_key: entry.value().user_key.clone(),
+                size: entry.value().size,
+                client_id: entry.value().client_id,
+                last_sequence_id,
+            })
+            .collect::<Vec<_>>();
+        snapshot.sort_by(|left, right| left.scoped_key.cmp(&right.scoped_key));
+        Ok(snapshot)
     }
 
     pub fn is_running(&self) -> bool {
@@ -3331,6 +3442,8 @@ impl HotStandbyService {
                     Ok(candidates) => {
                         let mut last_restore_error = None;
                         for snapshot in candidates {
+                            let mut snapshot_baseline_sequence_id =
+                                self.snapshot_baseline_sequence_id.write();
                             match restore_loaded_snapshot_state(
                                 &self.state,
                                 snapshot.segments.clone(),
@@ -3344,6 +3457,7 @@ impl HotStandbyService {
                                 snapshot.allocator_config,
                             ) {
                                 Ok(()) => {
+                                    *snapshot_baseline_sequence_id = snapshot.snapshot_sequence_id;
                                     let mut status = self.sync_status.write();
                                     status.applied_seq_id = snapshot.snapshot_sequence_id;
                                     baseline_seq_id = snapshot.snapshot_sequence_id;
