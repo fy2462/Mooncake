@@ -36,6 +36,12 @@ fn compress(value: &Value) -> Vec<u8> {
     zstd::stream::encode_all(Cursor::new(encode(value)), 3).unwrap()
 }
 
+#[test]
+fn cpp_parity_embedded_catalog_list_rejects_missing_object_store() {
+    let catalog = EmbeddedSnapshotCatalogStore::without_object_store("");
+    assert!(matches!(catalog.list(0), Err(HaError::InvalidParams(_))));
+}
+
 fn empty_loaded_snapshot(snapshot_id: &str, snapshot_sequence_id: u64) -> LoadedSnapshot {
     LoadedSnapshot {
         snapshot_id: snapshot_id.to_string(),

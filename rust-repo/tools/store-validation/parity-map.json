@@ -13782,13 +13782,15 @@
     "file": "ha/snapshot/catalog/backends/embedded/embedded_snapshot_catalog_store_test.cpp",
     "test": "EmbeddedSnapshotCatalogStoreStandaloneTest.ListReturnsInvalidParamsWhenObjectStoreMissing"
    },
-   "reason": "Semantic difference: C++ accepts a nullable object-store pointer and returns INVALID_PARAMS, while Rust construction requires Arc<dyn SnapshotObjectStore>, making null impossible; this API/error contract is not C++-only filesystem machinery.",
+   "reason": "Rust now exposes an explicit without_object_store compatibility constructor while retaining strongly typed non-null production constructors; every Embedded catalog I/O operation shares one missing-store InvalidParams guard. The executable parity test constructs that state, calls list(0), and precisely matches HaError::InvalidParams.",
    "review": {
-    "oracle": "embedded_snapshot_catalog_store_test.cpp ListReturnsInvalidParamsWhenObjectStoreMissing and embedded_snapshot_catalog_store.cpp ValidateObjectStore/List; Rust snapshot.rs EmbeddedSnapshotCatalogStore constructors",
+    "oracle": "embedded_snapshot_catalog_store_test.cpp ListReturnsInvalidParamsWhenObjectStoreMissing; embedded_snapshot_catalog_store.cpp ValidateObjectStore/List; rust-repo/crates/mooncake-store-master/tests/test_catalog_snapshot.rs::cpp_parity_embedded_catalog_list_rejects_missing_object_store",
     "reviewed": true
    },
-   "rust": [],
-   "status": "missing"
+   "rust": [
+    "mooncake-store-master/tests/test_catalog_snapshot.rs::cpp_parity_embedded_catalog_list_rejects_missing_object_store"
+   ],
+   "status": "covered"
   },
   {
    "behavior": "Deleting one snapshot removes every object under its prefix and leaves other published snapshots listable.",

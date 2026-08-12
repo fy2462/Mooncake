@@ -495,7 +495,7 @@ impl SnapshotObjectStore for S3SnapshotObjectStore {
 
 /// Embedded catalog store backed by files under the snapshot root.
 pub struct EmbeddedSnapshotCatalogStore {
-    object_store: Arc<dyn SnapshotObjectStore>,
+    object_store: Option<Arc<dyn SnapshotObjectStore>>,
     snapshot_root: String,
 }
 
@@ -513,20 +513,34 @@ impl EmbeddedSnapshotCatalogStore {
         cluster_id: &str,
     ) -> Self {
         Self {
-            object_store,
+            object_store: Some(object_store),
             snapshot_root: build_snapshot_root(cluster_id),
         }
+    }
+
+    pub fn without_object_store(cluster_id: &str) -> Self {
+        Self {
+            object_store: None,
+            snapshot_root: build_snapshot_root(cluster_id),
+        }
+    }
+
+    fn object_store(&self) -> Result<&Arc<dyn SnapshotObjectStore>, HaError> {
+        self.object_store.as_ref().ok_or_else(|| {
+            HaError::InvalidParams("embedded snapshot catalog object store is missing".into())
+        })
     }
 }
 
 impl SnapshotCatalogStore for EmbeddedSnapshotCatalogStore {
     fn publish(&self, snapshot: &SnapshotDescriptor) -> Result<(), HaError> {
         validate_snapshot_id(&snapshot.snapshot_id)?;
-        self.object_store.upload_string(
+        let object_store = self.object_store()?;
+        object_store.upload_string(
             &build_descriptor_key(&self.snapshot_root, &snapshot.snapshot_id),
             &serialize_snapshot_descriptor(snapshot),
         )?;
-        self.object_store.upload_string(
+        object_store.upload_string(
             &build_latest_key(&self.snapshot_root),
             &snapshot.snapshot_id,
         )?;
@@ -534,12 +548,11 @@ impl SnapshotCatalogStore for EmbeddedSnapshotCatalogStore {
     }
 
     fn get_latest(&self) -> Result<Option<SnapshotDescriptor>, HaError> {
-        let snapshot_id = match self
-            .object_store
-            .download_string(&build_latest_key(&self.snapshot_root))
+        let object_store = self.object_store()?;
+        let snapshot_id = match object_store.download_string(&build_latest_key(&self.snapshot_root))
         {
             Ok(value) => value.trim().to_string(),
-            Err(error) if self.object_store.is_not_found_error(&error.to_string()) => {
+            Err(error) if object_store.is_not_found_error(&error.to_string()) => {
                 return Ok(None);
             }
             Err(error) => return Err(error),
@@ -550,16 +563,15 @@ impl SnapshotCatalogStore for EmbeddedSnapshotCatalogStore {
             ));
         }
         validate_snapshot_id(&snapshot_id)?;
-        let payload = self
-            .object_store
+        let payload = object_store
             .download_string(&build_descriptor_key(&self.snapshot_root, &snapshot_id))?;
         deserialize_snapshot_descriptor(&self.snapshot_root, &snapshot_id, &payload).map(Some)
     }
 
     fn list(&self, limit: usize) -> Result<Vec<SnapshotDescriptor>, HaError> {
+        let object_store = self.object_store()?;
         let snapshot_root = self.snapshot_root.as_str();
-        let mut ids: Vec<String> = self
-            .object_store
+        let mut ids: Vec<String> = object_store
             .list_objects_with_prefix(snapshot_root)?
             .into_iter()
             .filter_map(|key| {
@@ -576,8 +588,7 @@ impl SnapshotCatalogStore for EmbeddedSnapshotCatalogStore {
             if limit != 0 && snapshots.len() >= limit {
                 break;
             }
-            let payload = match self
-                .object_store
+            let payload = match object_store
                 .download_string(&build_descriptor_key(&self.snapshot_root, &id))
             {
                 Ok(payload) => payload,
@@ -598,6 +609,7 @@ impl SnapshotCatalogStore for EmbeddedSnapshotCatalogStore {
 
     fn delete(&self, snapshot_id: &str) -> Result<(), HaError> {
         validate_snapshot_id(snapshot_id)?;
+        let object_store = self.object_store()?;
         let deletes_latest = self
             .get_latest()?
             .is_some_and(|latest| latest.snapshot_id.as_str() == snapshot_id);
@@ -608,16 +620,15 @@ impl SnapshotCatalogStore for EmbeddedSnapshotCatalogStore {
         } else {
             None
         };
-        self.object_store
+        object_store
             .delete_objects_with_prefix(&build_snapshot_prefix(&self.snapshot_root, snapshot_id))?;
         if let Some(next_latest) = next_latest {
-            self.object_store.upload_string(
+            object_store.upload_string(
                 &build_latest_key(&self.snapshot_root),
                 &next_latest.snapshot_id,
             )?;
         } else if deletes_latest {
-            self.object_store
-                .delete_objects_with_prefix(&build_latest_key(&self.snapshot_root))?;
+            object_store.delete_objects_with_prefix(&build_latest_key(&self.snapshot_root))?;
         }
         Ok(())
     }
