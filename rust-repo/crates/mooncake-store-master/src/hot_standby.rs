@@ -256,6 +256,7 @@ mod tests {
     use mooncake_store_core::{
         ObjectDataType, ReplicaDescriptor, ReplicaStatus, ReplicaType, ReplicateConfig, Segment,
     };
+    use parking_lot::Mutex;
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use uuid::Uuid;
 
@@ -279,6 +280,78 @@ mod tests {
     struct EtcdRecoveryFixtureNotifier {
         healthy: Arc<AtomicBool>,
         thread: Option<std::thread::JoinHandle<()>>,
+    }
+
+    struct StrictBaselineOpLog {
+        inner: InMemoryOpLog,
+        minimum_since: u64,
+        reads: Arc<Mutex<Vec<u64>>>,
+    }
+
+    impl OpLogStore for StrictBaselineOpLog {
+        fn append(&mut self, entry: &OpLogRecord) -> Result<u64, HaError> {
+            self.inner.append(entry)
+        }
+
+        fn read_since(
+            &self,
+            since_seq: u64,
+            max_count: usize,
+        ) -> Result<Vec<OpLogRecord>, HaError> {
+            self.reads.lock().push(since_seq);
+            if since_seq < self.minimum_since {
+                return Err(HaError::InvalidBackend(format!(
+                    "read crossed recovered snapshot baseline: since={since_seq}, minimum={}",
+                    self.minimum_since
+                )));
+            }
+            self.inner.read_since(since_seq, max_count)
+        }
+
+        fn latest_sequence(&self) -> u64 {
+            self.inner.latest_sequence()
+        }
+
+        fn max_sequence_id(&self) -> Result<u64, HaError> {
+            self.inner.max_sequence_id()
+        }
+
+        fn update_latest_sequence_id(&mut self, sequence_id: u64) -> Result<(), HaError> {
+            self.inner.update_latest_sequence_id(sequence_id)
+        }
+
+        fn record_snapshot_sequence_id(
+            &mut self,
+            snapshot_id: &str,
+            sequence_id: u64,
+        ) -> Result<(), HaError> {
+            self.inner
+                .record_snapshot_sequence_id(snapshot_id, sequence_id)
+        }
+
+        fn get_snapshot_sequence_id(&self, snapshot_id: &str) -> Result<u64, HaError> {
+            self.inner.get_snapshot_sequence_id(snapshot_id)
+        }
+
+        fn cleanup_before(&mut self, before_sequence_id: u64) -> Result<(), HaError> {
+            self.inner.cleanup_before(before_sequence_id)
+        }
+
+        fn flush_durable(&mut self) -> Result<(), HaError> {
+            self.inner.flush_durable()
+        }
+
+        fn poll_from(&self, since_seq: u64, max_count: usize) -> OpLogPollResult {
+            self.reads.lock().push(since_seq);
+            if since_seq < self.minimum_since {
+                return OpLogPollResult {
+                    records: Vec::new(),
+                    next_seq: since_seq,
+                    timed_out: true,
+                };
+            }
+            self.inner.poll_from(since_seq, max_count)
+        }
     }
 
     impl FlakyReadOpLog {
@@ -1929,8 +2002,13 @@ mod tests {
                 cluster_id: "test_cluster".into(),
             },
         );
+        let reads = Arc::new(Mutex::new(Vec::new()));
         service.set_snapshot_provider(Box::new(StaticSnapshotProvider { snapshot }));
-        service.set_oplog_store(Box::new(oplog));
+        service.set_oplog_store(Box::new(StrictBaselineOpLog {
+            inner: oplog,
+            minimum_since: 11,
+            reads: reads.clone(),
+        }));
         service.start().await.unwrap();
 
         tokio::time::timeout(std::time::Duration::from_secs(1), async {
@@ -1949,6 +2027,129 @@ mod tests {
             );
         }
         assert_eq!(service.latest_applied_sequence_id(), 20);
+        let reads = reads.lock();
+        assert!(!reads.is_empty());
+        assert!(reads.iter().all(|since| *since >= 11));
+        assert_eq!(reads[0], 11);
+        drop(reads);
+        service.stop();
+    }
+
+    #[tokio::test]
+    async fn cpp_parity_ha_oplog_ha_recovery_test_cpp_harecoverytest_gc_newstandbyaftercleanup() {
+        let state = Arc::new(MasterState::empty());
+        let client_id = Uuid::new_v4();
+        let segment = Segment {
+            id: Uuid::new_v4(),
+            name: "gc-new-standby:1".into(),
+            base: 0,
+            size: 20 * 1024,
+            te_endpoint: String::new(),
+            protocol: "tcp".into(),
+            host_id: String::new(),
+        };
+        let snapshot = crate::ha::LoadedSnapshot {
+            snapshot_id: "snap1".into(),
+            snapshot_sequence_id: 10,
+            allocator_config: None,
+            segments: vec![SegmentEntry {
+                segment: segment.clone(),
+                used: 10 * 1024,
+                client_id,
+                status: crate::proto::SegmentStatus::Active,
+            }],
+            nof_segments: vec![],
+            objects: (1_u64..=10)
+                .map(|index| {
+                    let key = format!("key_{index}");
+                    (
+                        TenantId::default().make_scoped_key(&key),
+                        snapshot_object(&key, &segment, (index - 1) * 1024, 1024),
+                    )
+                })
+                .collect(),
+            tasks: vec![],
+            replication_tasks: vec![],
+            graceful_unmounts: vec![],
+            delayed_replica_releases: vec![],
+            local_disk_segments: vec![],
+        };
+        let mut oplog = InMemoryOpLog::new(32);
+        for index in 1_u64..=20 {
+            let key = format!("key_{index}");
+            let replica = snapshot_object(&key, &segment, (index - 1) * 1024, 1024)
+                .replicas
+                .into_iter()
+                .next()
+                .unwrap();
+            assert_eq!(
+                oplog.append_payload(
+                    1,
+                    serde_json::json!({
+                        "op": "put_end",
+                        "key": key,
+                        "size": 1024,
+                        "client_id": Uuid::nil().to_string(),
+                        "tenant_id": "default",
+                        "group_id": "",
+                        "user_key": format!("key_{index}"),
+                        "replicas": [replica],
+                    })
+                    .to_string(),
+                ),
+                index
+            );
+        }
+        oplog.cleanup_before(10).unwrap();
+        assert_eq!(
+            oplog
+                .read_since(1, 32)
+                .unwrap()
+                .into_iter()
+                .map(|entry| entry.seq)
+                .collect::<Vec<_>>(),
+            (10_u64..=20).collect::<Vec<_>>()
+        );
+
+        let mut service = HotStandbyService::new(
+            state.clone(),
+            HotStandbyConfig {
+                enable_snapshot_bootstrap: true,
+                enable_oplog_following: true,
+                oplog_poll_interval_ms: 10,
+                cluster_id: "test_cluster".into(),
+            },
+        );
+        let reads = Arc::new(Mutex::new(Vec::new()));
+        service.set_snapshot_provider(Box::new(StaticSnapshotProvider { snapshot }));
+        service.set_oplog_store(Box::new(StrictBaselineOpLog {
+            inner: oplog,
+            minimum_since: 11,
+            reads: reads.clone(),
+        }));
+        service.start().await.unwrap();
+
+        tokio::time::timeout(std::time::Duration::from_secs(1), async {
+            while service.latest_applied_sequence_id() < 20 {
+                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("new standby did not replay post-GC sequences 11 through 20");
+        assert_eq!(state.objects.len(), 20);
+        for index in 1..=20 {
+            assert!(
+                state
+                    .objects
+                    .contains_key(&TenantId::default().make_scoped_key(&format!("key_{index}")))
+            );
+        }
+        assert_eq!(service.latest_applied_sequence_id(), 20);
+        let reads = reads.lock();
+        assert!(!reads.is_empty());
+        assert!(reads.iter().all(|since| *since >= 11));
+        assert_eq!(reads[0], 11);
+        drop(reads);
         service.stop();
     }
 

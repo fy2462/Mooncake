@@ -10369,13 +10369,18 @@
     "file": "ha/oplog/ha_recovery_test.cpp",
     "test": "HaRecoveryTest.GC_NewStandbyAfterCleanup"
    },
-   "reason": "Rust has separate LocalFS cleanup and in-memory snapshot-following evidence, but no discoverable elected-etcd/shared-oplog test composes GC, durable snapshot bootstrap, new standby recovery, and post-GC replay.",
+   "reason": "Rust composes the production in-memory shared-oplog cleanup and HotStandbyService paths: after writing 1 through 20 and cleaning before 10 it proves exact survivors 10 through 20, starts a new standby from a sequence-10 ten-key snapshot, replays 11 through 20, and proves the exact 20-key result at applied sequence 20.",
    "review": {
-    "oracle": "ha_recovery_test.cpp GC_NewStandbyAfterCleanup and OpLogApplier::Recover/ApplyOpLogEntries; Rust tests/test_oplog.rs cleanup parity and hot_standby.rs snapshot following",
+    "oracle": "ha_recovery_test.cpp GC_NewStandbyAfterCleanup and OpLogApplier::Recover/ApplyOpLogEntries; Rust hot_standby.rs cpp_parity_ha_oplog_ha_recovery_test_cpp_harecoverytest_gc_newstandbyaftercleanup",
     "reviewed": true
    },
-   "rust": [],
-   "status": "missing"
+   "rust": [
+    {
+     "file": "mooncake-store-master/src/hot_standby.rs",
+     "test": "cpp_parity_ha_oplog_ha_recovery_test_cpp_harecoverytest_gc_newstandbyaftercleanup"
+    }
+   ],
+   "status": "covered"
   },
   {
    "behavior": "When GC removes sequences 1 through 9 and no snapshot is available, applying surviving entries 10 through 20 initially applies zero; one post-timeout ProcessPendingEntries call skips sequence 1, registers sequence 2, and leaves final metadata size at most 11.",
