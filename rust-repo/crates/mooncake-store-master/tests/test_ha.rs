@@ -491,6 +491,48 @@ fn cpp_parity_ha_standby_hot_standby_snapshot_bootstrap_test_cpp_standbycontroll
 }
 
 #[test]
+fn cpp_parity_ha_standby_hot_standby_service_test_cpp_hotstandbyservicetest_teststart_invalidetcdendpoints()
+ {
+    let spec = HABackendSpec {
+        backend_type: HABackendType::Etcd,
+        connstring: "invalid_endpoint".into(),
+        cluster_namespace: "invalid-endpoint-test".into(),
+        pod_identity: None,
+    };
+    let config = MasterServiceSupervisorConfig {
+        cluster_id: "invalid-endpoint-test".into(),
+        ..Default::default()
+    };
+    let mut controller = CapabilityDrivenStandbyController::new(spec, config);
+
+    assert!(matches!(
+        controller.start_standby(None),
+        Err(HaError::InvalidBackend(_))
+    ));
+}
+
+#[test]
+fn cpp_parity_ha_standby_hot_standby_service_test_cpp_hotstandbyservicetest_teststatetransition_connectionfailed()
+ {
+    let spec = HABackendSpec {
+        backend_type: HABackendType::Etcd,
+        connstring: "bad_endpoint".into(),
+        cluster_namespace: "bad-endpoint-test".into(),
+        pod_identity: None,
+    };
+    let config = MasterServiceSupervisorConfig {
+        cluster_id: "bad-endpoint-test".into(),
+        ..Default::default()
+    };
+    let mut controller = CapabilityDrivenStandbyController::new(spec, config);
+
+    assert!(matches!(
+        controller.start_standby(None),
+        Err(HaError::InvalidBackend(_))
+    ));
+}
+
+#[test]
 fn test_capability_driven_controller_reports_catching_up_when_lagging() {
     let capabilities = StandbyRuntimeCapabilities {
         has_snapshot_bootstrap: false,

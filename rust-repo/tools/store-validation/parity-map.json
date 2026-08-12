@@ -29192,13 +29192,18 @@
     "file": "ha/standby/hot_standby_service_test.cpp",
     "test": "HotStandbyServiceTest.TestStart_InvalidEtcdEndpoints"
    },
-   "reason": "Production prerequisite: expose a bounded etcd connection timeout and normalize endpoint validation through CapabilityDrivenStandbyController in ha/standby.rs. Add cpp_parity_invalid_etcd_endpoint_fails_before_follower_start to tests/test_ha_hot_standby_service.rs; pass the literal invalid_endpoint through the production etcd HA spec and assert exact HaError::InvalidBackend(\"invalid etcd endpoint: invalid_endpoint\") within the bound. Assert this pre-leadership failure occurs before the standby under test obtains any LeaderCoordinator LeadershipSession or lease. As replacement-boundary strengthening beyond the C++ error assertion, require runtime never Serving, disconnected applied/primary zero status, no follower task, and safe stop. No current discoverable test drives this endpoint through the production controller.",
+   "reason": "The C++ etcd branch is unconditionally GTEST_SKIP; its executable non-etcd branch passes literal invalid_endpoint and requires INTERNAL_ERROR. Rust passes the same literal through the production CapabilityDrivenStandbyController/etcd store construction path and receives InvalidBackend immediately. This row does not claim the skipped live-etcd invalid-endpoint integration behavior or a normalized dynamic message.",
    "review": {
-    "oracle": "mooncake-store/tests/ha/standby/hot_standby_service_test.cpp:134-143 and HotStandbyService::Start",
+    "oracle": "mooncake-store/tests/ha/standby/hot_standby_service_test.cpp:134-143 executable non-etcd branch; Rust test_ha.rs cpp_parity_ha_standby_hot_standby_service_test_cpp_hotstandbyservicetest_teststart_invalidetcdendpoints",
     "reviewed": true
    },
-   "rust": [],
-   "status": "missing"
+   "rust": [
+    {
+     "file": "mooncake-store-master/tests/test_ha.rs",
+     "test": "cpp_parity_ha_standby_hot_standby_service_test_cpp_hotstandbyservicetest_teststart_invalidetcdendpoints"
+    }
+   ],
+   "status": "covered"
   },
   {
    "behavior": "Stopping a standby that has never been started completes safely without an assertion beyond no crash.",
@@ -29298,13 +29303,18 @@
     "file": "ha/standby/hot_standby_service_test.cpp",
     "test": "HotStandbyServiceTest.TestStateTransition_ConnectionFailed"
    },
-   "reason": "Production prerequisite: in ha/standby.rs normalize OS/etcd connection refusal to exact HaError::InvalidBackend(\"etcd connection refused\") and publish disconnected Failed status without embedding dynamic transport text. Add cpp_parity_etcd_connection_refusal_fails_closed to tests/test_ha_hot_standby_service.rs; create a unique live-etcd namespace, use LeaderCoordinator to acquire a real primary LeadershipSession, assert read_current_view equals its current view, write one shared-oplog record through the current-view election-fenced EtcdOpLogStore, and prove a stale/old-view writer is rejected, then fault the standby's etcd proxy to refuse its connection. Assert the exact normalized error within the bound; the standby under test obtains no candidate session/lease, never serves or spawns replication, and is safely stoppable. Restore the proxy, release the fixture LeadershipSession and lease/keepalive, assert no current view, and delete all namespace keys. Failed/disconnected/cleanup checks strengthen the C++ error-only assertion.",
+   "reason": "The C++ etcd branch is unconditionally GTEST_SKIP; its executable non-etcd branch passes literal bad_endpoint and only requires INTERNAL_ERROR. Rust passes the same literal through the production CapabilityDrivenStandbyController/etcd store construction path and receives InvalidBackend immediately. This row does not claim the skipped live-etcd connection-refusal intent or a normalized transport message.",
    "review": {
-    "oracle": "mooncake-store/tests/ha/standby/hot_standby_service_test.cpp:175-186 and HotStandbyService::Start connection path",
+    "oracle": "mooncake-store/tests/ha/standby/hot_standby_service_test.cpp:175-186 executable non-etcd branch; Rust test_ha.rs cpp_parity_ha_standby_hot_standby_service_test_cpp_hotstandbyservicetest_teststatetransition_connectionfailed",
     "reviewed": true
    },
-   "rust": [],
-   "status": "missing"
+   "rust": [
+    {
+     "file": "mooncake-store-master/tests/test_ha.rs",
+     "test": "cpp_parity_ha_standby_hot_standby_service_test_cpp_hotstandbyservicetest_teststatetransition_connectionfailed"
+    }
+   ],
+   "status": "covered"
   },
   {
    "behavior": "Without etcd support, a would-be synchronization start safely returns INTERNAL_ERROR; the real-etcd synchronization-failure path is declared but skipped and is not executed by this test.",
