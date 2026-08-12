@@ -29712,13 +29712,18 @@
     "file": "ha/standby/hot_standby_service_test.cpp",
     "test": "HotStandbyServiceTest.TestGetMetadataCount"
    },
-   "reason": "Production prerequisite: add a read-only metadata_count accessor to HotStandbyService backed by the shared MasterState object table, with its lifecycle scope documented. Add cpp_parity_fresh_standby_metadata_count_is_zero to src/hot_standby.rs; construct a fresh snapshot-only local service, assert the accessor returns exactly 0 before start, and avoid adding unrelated serving assertions. Direct MasterState access and source inspection are not this service observable.",
+   "reason": "Rust exposes a read-only HotStandbyService metadata_count accessor backed by the shared production MasterState object table. The mapped test constructs a fresh service and calls that service boundary before start, proving the count is exactly zero without substituting direct state inspection.",
    "review": {
-    "oracle": "mooncake-store/tests/ha/standby/hot_standby_service_test.cpp:398-400 and HotStandbyService::GetMetadataCount",
+    "oracle": "mooncake-store/tests/ha/standby/hot_standby_service_test.cpp:398-400 and HotStandbyService::GetMetadataCount; Rust hot_standby.rs cpp_parity_ha_standby_hot_standby_service_test_cpp_hotstandbyservicetest_testgetmetadatacount",
     "reviewed": true
    },
-   "rust": [],
-   "status": "missing"
+   "rust": [
+    {
+     "file": "mooncake-store-master/src/hot_standby.rs",
+     "test": "cpp_parity_ha_standby_hot_standby_service_test_cpp_hotstandbyservicetest_testgetmetadatacount"
+    }
+   ],
+   "status": "covered"
   },
   {
    "behavior": "Exporting metadata from a fresh standby succeeds and returns an empty snapshot.",

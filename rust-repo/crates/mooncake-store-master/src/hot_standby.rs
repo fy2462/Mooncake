@@ -1838,6 +1838,15 @@ mod tests {
         assert_eq!(service.latest_applied_sequence_id(), 0);
     }
 
+    #[test]
+    fn cpp_parity_ha_standby_hot_standby_service_test_cpp_hotstandbyservicetest_testgetmetadatacount()
+     {
+        let service =
+            HotStandbyService::new(Arc::new(MasterState::empty()), HotStandbyConfig::default());
+
+        assert_eq!(service.metadata_count(), 0);
+    }
+
     #[tokio::test]
     async fn test_snapshot_only_bootstrap_uses_empty_baseline_when_snapshot_missing() {
         let state = Arc::new(MasterState::empty());
@@ -2975,6 +2984,11 @@ impl HotStandbyService {
     /// Return the latest sequence restored or replayed by this standby.
     pub fn latest_applied_sequence_id(&self) -> u64 {
         self.sync_status.read().applied_seq_id
+    }
+
+    /// Return the number of object metadata entries currently held by the standby.
+    pub fn metadata_count(&self) -> usize {
+        self.state.objects.len()
     }
 
     pub fn is_running(&self) -> bool {
