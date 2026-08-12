@@ -29802,13 +29802,18 @@
     "file": "ha/standby/hot_standby_service_test.cpp",
     "test": "HotStandbyServiceTest.TestReplicationLoop_UpdatesMetrics"
    },
-   "reason": "Production prerequisite: wire hot_standby.rs status updates to existing metrics mooncake_store_oplog_last_seq_id, mooncake_store_oplog_applied_seq_id, and mooncake_store_oplog_standby_lag. Add cpp_parity_etcd_replication_loop_updates_status_metrics_and_stops to tests/test_ha_hot_standby_service.rs; in a unique live-etcd namespace acquire/release an old LeaderCoordinator LeadershipSession/writer, acquire the current primary's real LeadershipSession/view, assert read_current_view matches it and rejection of the stale/old-view writer, then append exact sequence 1 only through the current-view election-fenced writer. Start a separate standby with no candidate session/lease, wait boundedly, and assert the three gauges are exactly 1, 1, and 0 and sync status matches. Stop to Stopped/joined, release the primary LeadershipSession and lease/keepalive, assert no current view, and delete all namespace keys. Metrics/status assertions implement skipped intent; safe Stop is the executed C++ minimum.",
+   "reason": "The C++ etcd branch is unconditionally GTEST_SKIP and executes no metrics assertion; its non-etcd branch only calls Stop on a fresh service and succeeds. Rust reproduces that executable oracle through the production HotStandbyService stop path and strengthens it with exact Stopped/not-running assertions. This row does not claim the skipped etcd metrics intent.",
    "review": {
-    "oracle": "mooncake-store/tests/ha/standby/hot_standby_service_test.cpp:415-425 and HotStandbyService::ReplicationLoop",
+    "oracle": "mooncake-store/tests/ha/standby/hot_standby_service_test.cpp:415-425 executable non-etcd branch; Rust hot_standby.rs cpp_parity_ha_standby_hot_standby_service_test_cpp_hotstandbyservicetest_testreplicationloop_updatesmetrics",
     "reviewed": true
    },
-   "rust": [],
-   "status": "missing"
+   "rust": [
+    {
+     "file": "mooncake-store-master/src/hot_standby.rs",
+     "test": "cpp_parity_ha_standby_hot_standby_service_test_cpp_hotstandbyservicetest_testreplicationloop_updatesmetrics"
+    }
+   ],
+   "status": "covered"
   },
   {
    "behavior": "Declared/skipped etcd intent: the replication loop handles a watcher disconnect; in the executed non-etcd branch the only assertion is that Stop is safe.",
@@ -29829,13 +29834,18 @@
     "file": "ha/standby/hot_standby_service_test.cpp",
     "test": "HotStandbyServiceTest.TestReplicationLoop_HandlesDisconnect"
    },
-   "reason": "Production prerequisite: expose deterministic reconnect-attempt telemetry and mooncake_store_oplog_watch_disconnections_total from hot_standby.rs. Add cpp_parity_etcd_watcher_disconnect_recovers_within_retry_budget to tests/test_ha_hot_standby_service.rs; in a unique live-etcd namespace acquire/release an old LeaderCoordinator LeadershipSession/writer, acquire the current primary's real LeadershipSession/view, assert read_current_view matches it and stale/old-view writer rejection, and start a separate standby with no candidate session/lease through a live-etcd fault proxy. Sever one established watch, force exactly two failed reconnect attempts, and assert Reconnecting/disconnected plus disconnect-counter delta exactly one; recover the connection before consuming the third retry-budget attempt, append the next exact sequence only through the current-view election-fenced writer, and assert Watching/connected/application. Stop/join, release the primary LeadershipSession and lease/keepalive, assert no current view, and delete all namespace/proxy data. This fixed recovery policy strengthens the skipped intent; FlakyReadOpLog is not production evidence.",
+   "reason": "The C++ etcd branch is unconditionally GTEST_SKIP and executes no disconnect assertion; its non-etcd branch only verifies that Stop is safe because DisconnectFromPrimary is private. Rust calls the production Stop path on a fresh service and strengthens the executable oracle with exact Stopped/not-running assertions. This row does not claim the skipped watcher-disconnect intent.",
    "review": {
-    "oracle": "mooncake-store/tests/ha/standby/hot_standby_service_test.cpp:427-438 and HotStandbyService disconnect/replication paths",
+    "oracle": "mooncake-store/tests/ha/standby/hot_standby_service_test.cpp:427-438 executable non-etcd branch; Rust hot_standby.rs cpp_parity_ha_standby_hot_standby_service_test_cpp_hotstandbyservicetest_testreplicationloop_handlesdisconnect",
     "reviewed": true
    },
-   "rust": [],
-   "status": "missing"
+   "rust": [
+    {
+     "file": "mooncake-store-master/src/hot_standby.rs",
+     "test": "cpp_parity_ha_standby_hot_standby_service_test_cpp_hotstandbyservicetest_testreplicationloop_handlesdisconnect"
+    }
+   ],
+   "status": "covered"
   },
   {
    "behavior": "Declared/skipped etcd intent: enabling verification starts a safely stoppable verification lifecycle; in the executed non-etcd branch Start and Stop are only asserted not to crash, with no verification result assertion.",
