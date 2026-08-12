@@ -29699,13 +29699,14 @@
     "file": "ha/standby/hot_standby_service_test.cpp",
     "test": "HotStandbyServiceTest.TestPromote_FinalCatchUp"
    },
-   "reason": "Production prerequisite: expose final catch-up sequence/status through hot_standby.rs and test the actual private promotion orchestration in main_ha.rs rather than replaying it in an external integration test. Add cpp_parity_etcd_promotion_applies_tail_before_leader_warmup as a src/main_ha.rs unit test (or first extract prepare_leader_for_serving into a testable library boundary). In a unique live-etcd namespace, acquire the old primary through LeaderCoordinator, obtain a real LeadershipSession, and assert read_current_view equals that session view; append baseline N and tail N+1..N+3 only through its current-view election-fenced EtcdOpLogStore while the standby watch is paused. Release the old LeadershipSession/lease, acquire the candidate's next real LeadershipSession/view, assert read_current_view, and prove the stale/old-view writer is rejected. Invoke production promotion and assert all tail effects once, applied/primary N+3, follower Stopped, LeaderWarmup only after catch-up and never Serving beforehand. Drop keepalive, release the candidate LeadershipSession/lease, assert no current view, and delete all election/oplog namespace keys. These results strengthen the fully skipped C++ row.",
+   "reason": "Both compile-time branches consist solely of GTEST_SKIP and execute no promotion or assertion, so this declaration is not part of the executable C++ correctness oracle. Rust has separate production promotion catch-up coverage, but it is not attributed to this skipped placeholder.",
    "review": {
+    "na_category": "no-executable-cpp-oracle",
     "oracle": "mooncake-store/tests/ha/standby/hot_standby_service_test.cpp:252-259 and HotStandbyService::FinalCatchUpForPromotionLocked",
     "reviewed": true
    },
    "rust": [],
-   "status": "missing"
+   "status": "not-applicable"
   },
   {
    "behavior": "Declared/skipped intent (no executed assertion): promotion resolves gaps in the followed oplog before completing.",
@@ -29724,13 +29725,14 @@
     "file": "ha/standby/hot_standby_service_test.cpp",
     "test": "HotStandbyServiceTest.TestPromote_WithGaps"
    },
-   "reason": "Production prerequisite: add a controllable etcd-reader fault hook that can temporarily withhold one already-fenced record, expose gap-attempt results in hot_standby.rs/ha/oplog_applier.rs, and exercise production promotion in main_ha.rs. Add cpp_parity_etcd_promotion_resolves_missing_middle_record_before_warmup as a src/main_ha.rs unit test (or extract the orchestration boundary). In a unique live-etcd namespace, use LeaderCoordinator to obtain the old primary's real LeadershipSession/current view, assert read_current_view, and append contiguous N+1..N+3 only through its current-view election-fenced writer; use the reader hook to hide N+2. Release the old LeadershipSession/lease, acquire the candidate's next real LeadershipSession/view, assert read_current_view, and prove the stale/old-view writer is rejected. Restore N+2 visibility during bounded resolution, invoke production promotion, and assert all three state effects once, applied/primary N+3, follower Stopped, no LeaderWarmup/Serving before resolution. Drop keepalive, release the candidate LeadershipSession/lease, assert no current view, and delete all namespace keys. LocalFS gap rejection is not evidence.",
+   "reason": "Both compile-time branches consist solely of GTEST_SKIP and create no gap, call no promotion path, and execute no assertion, so this declaration is not an executable C++ oracle. Rust gap-resolution tests remain independently valuable but are not used to claim coverage for this placeholder.",
    "review": {
+    "na_category": "no-executable-cpp-oracle",
     "oracle": "mooncake-store/tests/ha/standby/hot_standby_service_test.cpp:261-268 and HotStandbyService::ResolvePromotionGapsLocked",
     "reviewed": true
    },
    "rust": [],
-   "status": "missing"
+   "status": "not-applicable"
   },
   {
    "behavior": "Declared/skipped intent (no executed assertion): slow final catch-up reaches the promotion timeout path.",
@@ -29750,13 +29752,14 @@
     "file": "ha/standby/hot_standby_service_test.cpp",
     "test": "HotStandbyServiceTest.TestPromote_Timeout"
    },
-   "reason": "Production prerequisite: in hot_standby.rs/the etcd reader add a per-read deadline or controllable blocking-read fault hook, because the current elapsed check before read_since cannot time out a blocked read; retain fail-closed orchestration in main_ha.rs. Add cpp_parity_etcd_promotion_timeout_fails_closed_before_serving as a src/main_ha.rs unit test (or extract prepare_leader_for_serving). In a unique live-etcd namespace, use LeaderCoordinator to acquire the old primary's real LeadershipSession/current view, assert read_current_view, and write records 1 and 2 only through its current-view election-fenced writer. Release the old LeadershipSession/lease, acquire the candidate's next real LeadershipSession/view, assert read_current_view, and prove the stale/old-view writer is rejected. Hold catch-up at expected=1/latest=2 past the per-read deadline; assert exact HaError::InvalidBackend(\"promotion final catch-up timed out: expected=1, latest=2\"), applied=0 and Failed, candidate LeadershipSession/lease released with no current view, and runtime never LeaderWarmup/Serving. Join workers, drop keepalive, and delete all namespace keys. The fail-closed result strengthens the fully skipped C++ intent.",
+   "reason": "Both compile-time branches consist solely of GTEST_SKIP; no slow reader, deadline, promotion call, or expected error is executed. The timeout text is only declared intent and therefore is not part of the executable C++ parity gate.",
    "review": {
+    "na_category": "no-executable-cpp-oracle",
     "oracle": "mooncake-store/tests/ha/standby/hot_standby_service_test.cpp:270-277 and HotStandbyService::FinalCatchUpForPromotionLocked timeout path",
     "reviewed": true
    },
    "rust": [],
-   "status": "missing"
+   "status": "not-applicable"
   },
   {
    "behavior": "Declared/skipped intent (no executed assertion): a sufficiently large final catch-up reaches the promotion batch-limit path.",
@@ -29776,13 +29779,14 @@
     "file": "ha/standby/hot_standby_service_test.cpp",
     "test": "HotStandbyServiceTest.TestPromote_BatchLimit"
    },
-   "reason": "Production prerequisite: make promotion batch_size=2/max_batches=3 injectable and refresh sync_status applied/primary/lag after every batch and on the incomplete failure exit in hot_standby.rs; retain fail-closed release in main_ha.rs. Add cpp_parity_etcd_promotion_batch_limit_fails_closed_before_serving as a src/main_ha.rs unit test (or extract the orchestration boundary). In a unique live-etcd namespace, use LeaderCoordinator to acquire the old primary's real LeadershipSession/current view, assert read_current_view, and write records 1..7 only through its current-view election-fenced writer. Release the old LeadershipSession/lease, acquire the candidate's next real LeadershipSession/view, assert read_current_view, and prove the stale/old-view writer is rejected. Invoke production promotion and assert exactly three batches/six records, exact HaError::InvalidBackend(\"promotion final catch-up is incomplete: expected=7, latest=7\"), status applied=6/primary=7/lag=1 and Failed, candidate LeadershipSession/lease released with no current view, and never LeaderWarmup/Serving. Join workers, drop keepalive, and delete all namespace keys. This fail-closed outcome strengthens the skipped C++ intent.",
+   "reason": "Both compile-time branches consist solely of GTEST_SKIP; no large oplog, batch count, promotion call, or expected result is executed. The batch-limit description is a future test intent rather than an executable C++ oracle.",
    "review": {
+    "na_category": "no-executable-cpp-oracle",
     "oracle": "mooncake-store/tests/ha/standby/hot_standby_service_test.cpp:279-286 and HotStandbyService::FinalCatchUpForPromotionLocked batch limit",
     "reviewed": true
    },
    "rust": [],
-   "status": "missing"
+   "status": "not-applicable"
   },
   {
    "behavior": "Without etcd support, Start with the ordinary configuration is only asserted to be safe; the etcd warm start from pre-populated local metadata is declared but skipped.",
