@@ -17,8 +17,8 @@ use uuid::Uuid;
 use crate::allocator::{AllocationStrategy, SegmentAllocator};
 use crate::ha::types::OpLogRecord;
 use crate::oplog::{
-    OpLogStore, decode_record_payload_value, recover_object_identity_from_payload,
-    verify_cpp_struct_pack_empty_replica_payload,
+    DecodedRecordPayload, OpLogStore, decode_record_payload_for_apply, decode_record_payload_value,
+    recover_object_identity_from_payload, verify_cpp_struct_pack_empty_replica_payload,
 };
 use crate::service::helpers::{
     account_cache_total_removal, checked_allocating_memory_quota_charge,
@@ -34,6 +34,7 @@ use crate::service::{
 
 const MAX_OBJECT_KEY_SIZE: usize = 4096;
 const MAX_PAYLOAD_SIZE: usize = 10 * 1024 * 1024;
+const MISSING_ENTRY_SKIP_TIMEOUT: Duration = Duration::from_secs(3);
 
 struct ReplayedAllocatorState {
     memory: SegmentAllocator,
@@ -57,6 +58,7 @@ pub(crate) struct OpLogApplier {
     expected_seq: AtomicU64,
     apply_lock: Mutex<()>,
     pending_entries: Mutex<BTreeMap<u64, OpLogRecord>>,
+    missing_sequence_first_seen: Mutex<BTreeMap<u64, Instant>>,
     max_pending_entries: usize,
 }
 
@@ -67,6 +69,7 @@ impl OpLogApplier {
             expected_seq: AtomicU64::new(1),
             apply_lock: Mutex::new(()),
             pending_entries: Mutex::new(BTreeMap::new()),
+            missing_sequence_first_seen: Mutex::new(BTreeMap::new()),
             max_pending_entries: 100_000,
         }
     }
@@ -78,6 +81,7 @@ impl OpLogApplier {
         self.state.clear_transient_promotion_candidates();
         self.expected_seq.store(base_seq + 1, Ordering::Release);
         self.pending_entries.lock().clear();
+        self.missing_sequence_first_seen.lock().clear();
     }
 
     /// Return the next expected sequence ID.
@@ -115,6 +119,7 @@ impl OpLogApplier {
         if entry.seq != expected || !Self::apply_one(&self.state, &entry.payload) {
             return 0;
         }
+        self.missing_sequence_first_seen.lock().remove(&expected);
         self.expected_seq.store(expected + 1, Ordering::Release);
         let mut applied = 1;
 
@@ -126,6 +131,7 @@ impl OpLogApplier {
             if !Self::apply_one(&self.state, &pending.payload) {
                 break;
             }
+            self.missing_sequence_first_seen.lock().remove(&next);
             self.expected_seq.store(next + 1, Ordering::Release);
             applied += 1;
         }
@@ -165,13 +171,65 @@ impl OpLogApplier {
         (needed, fetched)
     }
 
+    /// Process buffered entries and skip a missing sequence after the C++
+    /// compatibility timeout.
+    pub fn process_pending_entries(&self) -> usize {
+        self.process_pending_entries_at(Instant::now())
+    }
+
+    fn process_pending_entries_at(&self, now: Instant) -> usize {
+        let _apply_guard = self.apply_lock.lock();
+
+        loop {
+            let expected = self.expected_seq.load(Ordering::Acquire);
+            let first_pending = self
+                .pending_entries
+                .lock()
+                .first_key_value()
+                .map(|(&seq, _)| seq);
+            let Some(first_pending) = first_pending else {
+                break;
+            };
+            if first_pending <= expected {
+                break;
+            }
+
+            let mut missing = self.missing_sequence_first_seen.lock();
+            let Some(first_seen) = missing.get(&expected).copied() else {
+                missing.insert(expected, now);
+                break;
+            };
+            if now.saturating_duration_since(first_seen) < MISSING_ENTRY_SKIP_TIMEOUT {
+                break;
+            }
+            missing.remove(&expected);
+            self.expected_seq.store(expected + 1, Ordering::Release);
+        }
+
+        let mut processed = 0;
+        loop {
+            let expected = self.expected_seq.load(Ordering::Acquire);
+            let Some(entry) = self.pending_entries.lock().remove(&expected) else {
+                break;
+            };
+            if !Self::apply_one(&self.state, &entry.payload) {
+                break;
+            }
+            self.missing_sequence_first_seen.lock().remove(&expected);
+            self.expected_seq.store(expected + 1, Ordering::Release);
+            processed += 1;
+        }
+        processed
+    }
+
     /// Apply a single payload to MasterState.
     fn apply_one(state: &MasterState, payload: &str) -> bool {
         if payload.len() > MAX_PAYLOAD_SIZE {
             return false;
         }
-        let v = match decode_record_payload_value(payload) {
-            Ok(v) => v,
+        let (v, cpp_wire_put_end_fallback) = match decode_record_payload_for_apply(payload) {
+            Ok(DecodedRecordPayload::Ordinary(value)) => (value, false),
+            Ok(DecodedRecordPayload::CppWirePutEndFallback(value)) => (value, true),
             Err(_) => return false,
         };
 
@@ -237,6 +295,37 @@ impl OpLogApplier {
                         return false;
                     };
                     Some(object)
+                } else if cpp_wire_put_end_fallback {
+                    // The C++ applier deliberately turns an empty or malformed
+                    // PUT_END payload into default metadata. The C++ wire
+                    // decoder preserves that fallback provenance as a typed
+                    // envelope, so ordinary legacy Rust completion markers
+                    // keep their existing snapshot-object-only semantics.
+                    let (tenant_id, user_key) = match crate::TenantId::parse_scoped_key(durable_key)
+                    {
+                        Ok(identity) => identity,
+                        Err(_) => return false,
+                    };
+                    Some(ObjectEntry {
+                        replicas: Vec::new(),
+                        size: 0,
+                        last_access: SystemTime::now(),
+                        hard_pinned: false,
+                        data_type: mooncake_store_core::ObjectDataType::General,
+                        client_id: Uuid::nil(),
+                        put_start_time: None,
+                        lease_timeout: None,
+                        soft_pin_timeout: None,
+                        tenant_id,
+                        group_id: String::new(),
+                        quota_committed: true,
+                        reserved_quota_charge_bytes: 0,
+                        committed_quota_charge_bytes: 0,
+                        pending_replaced_quota_charge_bytes: 0,
+                        memory_cache_total_accounted: false,
+                        disk_cache_total_accounted: false,
+                        user_key,
+                    })
                 } else {
                     match (recovered_identity.as_ref(), v.get("replicas").cloned()) {
                         (Some(identity), Some(replicas)) => {
@@ -2862,6 +2951,85 @@ mod tests {
     }
 
     #[test]
+    fn cpp_parity_ha_oplog_oplog_applier_test_cpp_oplogappliertest_testapplyputend_invalidpayload()
+    {
+        let state = make_state();
+        let applier = OpLogApplier::new(state.clone());
+        let record = cpp_put_end_wire_record_with_payload(1, b"{invalid data}");
+
+        assert_eq!(applier.apply_op_log_entries(&[record]), 1);
+        assert_eq!(applier.get_expected_sequence_id(), 2);
+        let object = state.objects.get("default\0key1").expect("key1 created");
+        assert_eq!(object.client_id, Uuid::nil());
+        assert_eq!(object.size, 0);
+        assert!(object.replicas.is_empty());
+    }
+
+    #[test]
+    fn cpp_malformed_put_end_at_wire_size_limit_still_uses_default_metadata() {
+        let state = make_state();
+        let applier = OpLogApplier::new(state.clone());
+        let malformed_payload = vec![b'x'; MAX_PAYLOAD_SIZE];
+        let record = cpp_put_end_wire_record_with_payload(1, &malformed_payload);
+
+        assert!(record.payload.len() < MAX_PAYLOAD_SIZE);
+        assert_eq!(applier.apply_op_log_entries(&[record]), 1);
+        assert_eq!(applier.get_expected_sequence_id(), 2);
+        let object = state.objects.get("default\0key1").expect("key1 created");
+        assert_eq!(object.client_id, Uuid::nil());
+        assert_eq!(object.size, 0);
+        assert!(object.replicas.is_empty());
+    }
+
+    #[test]
+    fn cpp_parity_ha_oplog_oplog_applier_test_cpp_oplogappliertest_testapplyputend_emptypayload() {
+        let state = make_state();
+        let applier = OpLogApplier::new(state.clone());
+        let record = cpp_put_end_wire_record_with_payload(1, b"");
+
+        assert_eq!(applier.apply_op_log_entries(&[record]), 1);
+        assert_eq!(applier.get_expected_sequence_id(), 2);
+        let object = state.objects.get("default\0key1").expect("key1 created");
+        assert_eq!(object.client_id, Uuid::nil());
+        assert_eq!(object.size, 0);
+        assert!(object.replicas.is_empty());
+    }
+
+    #[test]
+    fn cpp_parity_ha_oplog_oplog_applier_test_cpp_oplogappliertest_testpendingentriesskip() {
+        use crate::oplog::test_support::TEST_CPP_OP_PUT_END;
+
+        let state = make_state();
+        let applier = OpLogApplier::new(state.clone());
+        assert_eq!(
+            applier.apply_op_log_entries(&[cpp_wire_record_for_key(
+                1,
+                TEST_CPP_OP_PUT_END,
+                "key1",
+            )]),
+            1
+        );
+        assert_eq!(
+            applier.apply_op_log_entries(&[cpp_wire_record_for_key(
+                4,
+                TEST_CPP_OP_PUT_END,
+                "key4",
+            )]),
+            0
+        );
+
+        let first_seen = Instant::now();
+        assert_eq!(applier.process_pending_entries_at(first_seen), 0);
+        assert_eq!(applier.get_expected_sequence_id(), 2);
+        assert_eq!(
+            applier.process_pending_entries_at(first_seen + Duration::from_secs(3)),
+            0
+        );
+        assert_eq!(applier.get_expected_sequence_id(), 3);
+        assert!(!state.objects.contains_key("default\0key4"));
+    }
+
+    #[test]
     fn cpp_parity_ha_oplog_oplog_applier_test_cpp_oplogappliertest_testapplyoplogentries_batch() {
         use crate::oplog::test_support::TEST_CPP_OP_PUT_END;
 
@@ -3075,7 +3243,7 @@ mod tests {
     }
 
     #[test]
-    fn cpp_struct_pack_empty_replica_bypass_requires_verified_wire_provenance() {
+    fn cpp_struct_pack_forgery_is_rejected_but_verified_malformed_wire_falls_back() {
         use base64::Engine as _;
         use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 
@@ -3100,6 +3268,12 @@ mod tests {
                 "replicas": [],
                 "legacy_cpp_struct_pack_payload_base64":
                     BASE64_STANDARD.encode(CPP_STRUCT_PACK_EMPTY_REPLICA_PAYLOAD)
+            }),
+            serde_json::json!({
+                "op": "put_end",
+                "key": "key1",
+                "size": 0,
+                "metadata_payload_base64": "not-wire-provenance"
             }),
         ];
         for payload in forged_payloads {
@@ -3130,10 +3304,13 @@ mod tests {
             let applier = OpLogApplier::new(state.clone());
             assert_eq!(
                 applier.apply_op_log_entries(&[cpp_put_end_wire_record_with_payload(1, &payload)]),
-                0
+                1
             );
-            assert_eq!(applier.get_expected_sequence_id(), 1);
-            assert!(state.objects.is_empty());
+            assert_eq!(applier.get_expected_sequence_id(), 2);
+            let object = state.objects.get("default\0key1").expect("key1 created");
+            assert_eq!(object.client_id, Uuid::nil());
+            assert_eq!(object.size, 0);
+            assert!(object.replicas.is_empty());
         }
     }
 

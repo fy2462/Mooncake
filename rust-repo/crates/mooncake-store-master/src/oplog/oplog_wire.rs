@@ -1,5 +1,10 @@
 use super::*;
 
+pub(crate) enum DecodedRecordPayload {
+    Ordinary(serde_json::Value),
+    CppWirePutEndFallback(serde_json::Value),
+}
+
 pub(super) fn serialize_etcd_oplog_value(entry: &OpLogRecord) -> Result<String, HaError> {
     validate_record_size(entry)?;
     if let Some(wire) = cpp_wire_entry_from_record(entry) {
@@ -338,6 +343,9 @@ pub(crate) fn decode_put_end_msgpack(bytes: &[u8]) -> Result<serde_json::Value, 
 }
 
 pub(crate) fn decode_record_payload_value(payload: &str) -> Result<serde_json::Value, HaError> {
+    if let Some(value) = decode_cpp_put_end_fallback_envelope(payload)? {
+        return Ok(value);
+    }
     if let Some(bytes) = decode_msgpack_record_payload_bytes(payload)? {
         reject_unknown_put_end_msgpack_version(&bytes)?;
         if bytes.starts_with(PUT_END_MSGPACK_MAGIC) {
@@ -353,6 +361,44 @@ pub(crate) fn decode_record_payload_value(payload: &str) -> Result<serde_json::V
     }
     serde_json::from_str(payload)
         .map_err(|e| HaError::InvalidBackend(format!("oplog json decode: {e}")))
+}
+
+pub(crate) fn decode_record_payload_for_apply(
+    payload: &str,
+) -> Result<DecodedRecordPayload, HaError> {
+    if let Some(value) = decode_cpp_put_end_fallback_envelope(payload)? {
+        return Ok(DecodedRecordPayload::CppWirePutEndFallback(value));
+    }
+    decode_record_payload_value(payload).map(DecodedRecordPayload::Ordinary)
+}
+
+fn decode_cpp_put_end_fallback_envelope(
+    payload: &str,
+) -> Result<Option<serde_json::Value>, HaError> {
+    let Some(encoded) = payload.strip_prefix(CPP_PUT_END_FALLBACK_RECORD_PREFIX) else {
+        return Ok(None);
+    };
+    let bytes = BASE64_STANDARD.decode(encoded).map_err(|error| {
+        HaError::InvalidBackend(format!(
+            "C++ PUT_END fallback envelope base64 decode: {error}"
+        ))
+    })?;
+    let value: serde_json::Value = serde_json::from_slice(&bytes).map_err(|error| {
+        HaError::InvalidBackend(format!("C++ PUT_END fallback envelope decode: {error}"))
+    })?;
+    let valid_shape = value.as_object().is_some_and(|object| object.len() == 3)
+        && value.get("op").and_then(serde_json::Value::as_str) == Some("put_end")
+        && value
+            .get("key")
+            .and_then(serde_json::Value::as_str)
+            .is_some()
+        && value.get("size").and_then(serde_json::Value::as_u64) == Some(0);
+    if !valid_shape {
+        return Err(HaError::InvalidBackend(
+            "invalid C++ PUT_END fallback envelope".to_string(),
+        ));
+    }
+    Ok(Some(value))
 }
 
 pub(super) fn rust_payload_from_cpp_wire_entry(
@@ -412,13 +458,17 @@ pub(super) fn rust_payload_from_cpp_wire_entry(
                     return Ok(payload);
                 }
             }
-            Ok(json!({
+            let fallback = json!({
                 "op": "put_end",
                 "key": wire.object_key,
-                "size": 0,
-                "metadata_payload_base64": metadata_payload_base64
+                "size": 0
             })
-            .to_string())
+            .to_string();
+            Ok(format!(
+                "{}{}",
+                CPP_PUT_END_FALLBACK_RECORD_PREFIX,
+                BASE64_STANDARD.encode(fallback.as_bytes())
+            ))
         }
         CPP_OP_PUT_REVOKE => Ok(json!({"op": "put_revoke", "key": wire.object_key}).to_string()),
         CPP_OP_REMOVE => Ok(json!({"op": "remove", "key": wire.object_key}).to_string()),

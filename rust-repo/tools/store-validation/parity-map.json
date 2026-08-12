@@ -11886,13 +11886,18 @@
     "file": "ha/oplog/oplog_applier_test.cpp",
     "test": "OpLogApplierTest.TestPendingEntriesSkip"
    },
-   "reason": "Semantic divergence: C++ may skip ordered oplog history after timeout, while Rust waits and retries recovery without an applier timer-skip path.",
+   "reason": "Rust deterministically drives the production pending-entry timeout clock: sequence 1 advances to 2, sequence 4 remains buffered, the first processing pass records missing sequence 2, and the pass at exactly three seconds skips only sequence 2, advances to 3, and leaves key4 unapplied.",
    "review": {
     "oracle": "oplog_applier_test.cpp TestPendingEntriesSkip and oplog_applier.cpp ProcessPendingEntries; Rust ha/oplog_applier.rs pending gap policy",
     "reviewed": true
    },
-   "rust": [],
-   "status": "missing"
+   "rust": [
+    {
+     "file": "mooncake-store-master/src/ha/oplog_applier.rs",
+     "test": "cpp_parity_ha_oplog_oplog_applier_test_cpp_oplogappliertest_testpendingentriesskip"
+    }
+   ],
+   "status": "covered"
   },
   {
    "behavior": "A C++ struct-pack PUT_END payload round-trips client-id pair and size into stored metadata.",
@@ -11963,13 +11968,18 @@
     "file": "ha/oplog/oplog_applier_test.cpp",
     "test": "OpLogApplierTest.TestApplyPutEnd_InvalidPayload"
    },
-   "reason": "Semantic divergence: C++ falls back to default metadata on malformed payload, whereas Rust decode_record_payload_value/apply_one rejects it and does not advance.",
+   "reason": "Rust feeds the exact malformed bytes through the production C++ wire decoder and applier, then proves one applied entry, expected sequence two, and default key metadata with nil client id, zero size, and no replicas.",
    "review": {
     "oracle": "oplog_applier_test.cpp TestApplyPutEnd_InvalidPayload and oplog_applier.cpp ApplyPutEnd fallback; Rust ha/oplog_applier.rs decode_record_payload_value/apply_one",
     "reviewed": true
    },
-   "rust": [],
-   "status": "missing"
+   "rust": [
+    {
+     "file": "mooncake-store-master/src/ha/oplog_applier.rs",
+     "test": "cpp_parity_ha_oplog_oplog_applier_test_cpp_oplogappliertest_testapplyputend_invalidpayload"
+    }
+   ],
+   "status": "covered"
   },
   {
    "behavior": "An empty PUT_END payload still creates default metadata and advances expected sequence to 2.",
@@ -11985,13 +11995,18 @@
     "file": "ha/oplog/oplog_applier_test.cpp",
     "test": "OpLogApplierTest.TestApplyPutEnd_EmptyPayload"
    },
-   "reason": "Semantic divergence: C++ accepts empty payload as default metadata, while Rust decoding fails and prevents application and sequence advancement.",
+   "reason": "Rust feeds an empty payload through the production C++ wire decoder and applier, then proves one applied entry, expected sequence two, and default key metadata with nil client id, zero size, and no replicas.",
    "review": {
     "oracle": "oplog_applier_test.cpp TestApplyPutEnd_EmptyPayload and oplog_applier.cpp ApplyPutEnd fallback; Rust ha/oplog_applier.rs decode_record_payload_value/apply_one",
     "reviewed": true
    },
-   "rust": [],
-   "status": "missing"
+   "rust": [
+    {
+     "file": "mooncake-store-master/src/ha/oplog_applier.rs",
+     "test": "cpp_parity_ha_oplog_oplog_applier_test_cpp_oplogappliertest_testapplyputend_emptypayload"
+    }
+   ],
+   "status": "covered"
   },
   {
    "behavior": "A batch of contiguous sequences 1 through 3 reports three applied entries, expected sequence 4, and three keys.",

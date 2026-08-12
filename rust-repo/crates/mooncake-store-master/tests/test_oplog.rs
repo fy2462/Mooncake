@@ -1602,10 +1602,11 @@ fn test_etcd_oplog_value_reads_cpp_binary_put_end_payload() {
 
     let parsed = deserialize_etcd_value_for_test(&value).unwrap();
     assert_eq!(parsed.seq, 9);
-    let payload: serde_json::Value = serde_json::from_str(&parsed.payload).unwrap();
+    let payload = decode_record_payload_value_for_test(&parsed.payload).unwrap();
     assert_eq!(payload["op"], "put_end");
     assert_eq!(payload["key"], "k-binary");
-    assert_eq!(payload["metadata_payload_base64"], wire.payload);
+    assert_eq!(payload["size"], 0);
+    assert!(payload.get("metadata_payload_base64").is_none());
 }
 
 #[test]

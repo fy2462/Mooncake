@@ -66,6 +66,7 @@ const PUT_END_MSGPACK_MAGIC_V1: &[u8] = b"MCOPMETA1";
 const PUT_END_MSGPACK_MAGIC_V2: &[u8] = b"MCOPMETA2";
 const PUT_END_MSGPACK_MAGIC: &[u8] = b"MCOPMETA3";
 const OPLOG_MSGPACK_RECORD_PREFIX: &str = "msgpack:";
+const CPP_PUT_END_FALLBACK_RECORD_PREFIX: &str = "cpp-put-end-fallback:";
 const ETCD_WATCH_SYNC_BATCH_SIZE: usize = 1000;
 const ETCD_WATCH_MAX_CONSECUTIVE_ERRORS: usize = 10;
 const ETCD_WATCH_RECONNECT_DELAY_MS: u64 = 1000;
@@ -556,7 +557,8 @@ pub use oplog_local::{LocalFsOpLogError, LocalFsOpLogStore};
 pub(crate) use oplog_manager::LeaseRefreshEntry;
 pub use oplog_manager::OpLogManager;
 pub(crate) use oplog_wire::{
-    decode_record_payload_value, verify_cpp_struct_pack_empty_replica_payload,
+    DecodedRecordPayload, decode_record_payload_for_apply, decode_record_payload_value,
+    verify_cpp_struct_pack_empty_replica_payload,
 };
 
 fn validate_snapshot_id(snapshot_id: &str) -> Result<(), HaError> {
