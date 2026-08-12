@@ -98,6 +98,50 @@ fn test_bucket_storage_backend_offload_load_scan_and_remove() {
 }
 
 #[test]
+fn cpp_parity_storage_backend_test_storagebackendtest_storagebackendall() {
+    let tmp = temp_dir();
+    let backend = StorageBackend::new(StorageBackendType::Bucket, &tmp);
+
+    assert!(backend.init());
+    assert!(std::fs::read_dir(&tmp).unwrap().next().is_none());
+    assert!(!backend.init());
+
+    let expected = vec![
+        ("key-a".to_string(), b"alpha".to_vec()),
+        ("key-b".to_string(), b"beta-beta".to_vec()),
+        ("key-c".to_string(), vec![b'c'; 1024]),
+    ];
+    backend.batch_offload(&expected).unwrap();
+
+    let mut metadata = backend.scan_meta().unwrap();
+    metadata.sort_by(|left, right| left.0.cmp(&right.0));
+    assert_eq!(
+        metadata,
+        expected
+            .iter()
+            .map(|(key, bytes)| (key.clone(), bytes.len() as u64))
+            .collect::<Vec<_>>()
+    );
+
+    let keys = expected
+        .iter()
+        .map(|(key, _)| key.clone())
+        .collect::<Vec<_>>();
+    let loaded = backend.batch_load(&keys).unwrap();
+    assert_eq!(loaded, expected);
+    for (key, bytes) in &loaded {
+        assert!(backend.is_exist(key).unwrap());
+        assert_eq!(
+            bytes.len(),
+            metadata.iter().find(|(name, _)| name == key).unwrap().1 as usize
+        );
+    }
+
+    assert_eq!(backend.remove_all().unwrap(), 3);
+    assert!(backend.scan_meta().unwrap().is_empty());
+}
+
+#[test]
 fn cpp_parity_bucket_storage_backend_concurrent_read_write_delete() {
     // C++ StorageBackendTest.BucketStorageBackend_ConcurrentReadWriteDelete:
     // under concurrent unique-key writes, exact reads, and deletion attempts

@@ -34,6 +34,7 @@ use std::fs;
 use std::io::{BufReader, BufWriter, Read, Write};
 use std::os::fd::AsRawFd;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use uuid::Uuid;
 use xxhash_rust::xxh64::xxh64;
 
@@ -61,6 +62,7 @@ pub struct StorageBackend {
     distributed_config: Option<DistributedStorageConfig>,
     distributed_adapter: Option<Box<dyn FileSystemAdapter>>,
     available_space_probe: Box<AvailableSpaceProbe>,
+    explicit_initialized: AtomicBool,
 }
 
 // =============================================================================
@@ -82,6 +84,7 @@ impl StorageBackend {
                     distributed_config: None,
                     distributed_adapter: None,
                     available_space_probe: Box::new(|path| fs2::available_space(path)),
+                    explicit_initialized: AtomicBool::new(false),
                 }
             });
         }
@@ -93,6 +96,7 @@ impl StorageBackend {
             distributed_config: None,
             distributed_adapter: None,
             available_space_probe: Box::new(|path| fs2::available_space(path)),
+            explicit_initialized: AtomicBool::new(false),
         }
     }
 
@@ -109,6 +113,7 @@ impl StorageBackend {
             distributed_config: None,
             distributed_adapter: None,
             available_space_probe,
+            explicit_initialized: AtomicBool::new(false),
         }
     }
 
@@ -132,7 +137,17 @@ impl StorageBackend {
             distributed_config: Some(config),
             distributed_adapter: Some(adapter),
             available_space_probe: Box::new(|path| fs2::available_space(path)),
+            explicit_initialized: AtomicBool::new(false),
         })
+    }
+
+    /// C++-compatible explicit initialization handshake. Construction already
+    /// prepares Rust's usable backend, so this method only exposes the
+    /// externally observable first-success / repeated-failure lifecycle.
+    pub fn init(&self) -> bool {
+        self.explicit_initialized
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_ok()
     }
 
     fn run_distributed_health_check(

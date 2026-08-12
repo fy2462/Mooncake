@@ -17122,13 +17122,18 @@
     "file": "storage_backend_test.cpp",
     "test": "StorageBackendTest.StorageBackendAll"
    },
-   "reason": "This row contains one production semantic conflict plus an otherwise well-supported result path. Rust mooncake-store-master/tests/test_storage/backends.rs::test_bucket_storage_backend_offload_load_scan_and_remove proves successful multi-key offload, exact load bytes, scan sizes, existence before removal, and absence after removal. Rust BucketStorageBackend::ensure_initialized is deliberately lazy and idempotent, however, so it cannot reproduce the C++ second-Init INTERNAL_ERROR. Add cpp_parity_bucket_storage_backend_all_repeated_init_and_query as a failing decision test: assert the chosen repeated-initialization result, then require complete query metadata, exact sizes, existence, and exact bytes for every inserted key. Keep missing until the initialization policy is reconciled and the aggregate oracle executes.",
+   "reason": "Rust retains constructor-ready data operations while exposing a thread-safe explicit initialization handshake on the public StorageBackend: the first Init succeeds and the second fails without changing lazy production usability. The aggregate Bucket test proves the directory is initially empty, offloads three distinct values, obtains one exact key/size metadata entry per value, loads exact bytes in requested order, verifies existence for every key, and removes all three with an empty final scan. Rust batch_offload returns Result<()> rather than C++'s success count, so completeness is proven by the full metadata/load/existence matrix.",
    "review": {
     "oracle": "mooncake-store/tests/storage_backend_test.cpp:158-212, Rust bucket.rs:262-290, and mooncake-store-master/tests/test_storage/backends.rs:55-95",
     "reviewed": true
    },
-   "rust": [],
-   "status": "missing"
+   "rust": [
+    {
+     "file": "mooncake-store-master/tests/test_storage/backends.rs",
+     "test": "cpp_parity_storage_backend_test_storagebackendtest_storagebackendall"
+    }
+   ],
+   "status": "covered"
   },
   {
    "behavior": "BucketScan returns exact continuation bucket IDs and bucket membership across pages, reports key/data sizes, returns zero at exhaustion or beyond the end, and returns KEYS_EXCEED_BUCKET_LIMIT with all outputs empty when one bucket exceeds the limit.",
