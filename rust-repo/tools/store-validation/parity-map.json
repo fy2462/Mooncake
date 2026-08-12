@@ -18356,13 +18356,18 @@
     "file": "storage_backend_test.cpp",
     "test": "StorageBackendTest.BucketPendingWriteRejectsReentrantDuplicate"
    },
-   "reason": "Rust production reserves the target key and bucket from prepare through commit, so a reentrant prepare_write of the same key is rejected while the outer pending write is live; however there is no direct test and Rust currently returns StoreError::Internal(\"busy\") instead of C++ OBJECT_ALREADY_EXISTS. Add cpp_parity_storage_backend_test_cpp_storagebackendtest_bucketpendingwriterejectsreentrantduplicate_cc440547; prove the mapped duplicate result, successful outer commit, and exact outer bytes.",
+   "reason": "Rust bucket.rs:cpp_parity_storage_backend_test_cpp_storagebackendtest_bucketpendingwriterejectsreentrantduplicate_cc440547 holds the production outer pending reservation for shared_key, proves a nested prepare of the same key returns exactly StoreError::ObjectExists, then commits the outer 3 KiB A payload and reads back every outer byte unchanged.",
    "review": {
     "oracle": "mooncake-store/tests/storage_backend_test.cpp:3289-3338, C++ BatchOffload completion callback, and Rust BucketStorageBackend target reservation/commit_write_with_generation",
     "reviewed": true
    },
-   "rust": [],
-   "status": "missing"
+   "rust": [
+    {
+     "file": "mooncake-store-client/src/local_storage_backend/bucket.rs",
+     "test": "cpp_parity_storage_backend_test_cpp_storagebackendtest_bucketpendingwriterejectsreentrantduplicate_cc440547"
+    }
+   ],
+   "status": "covered"
   },
   {
    "behavior": "Finalize failure still cleans old metadata, preserves new key after restart.",

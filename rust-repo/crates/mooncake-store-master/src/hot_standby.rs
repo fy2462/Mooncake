@@ -2144,6 +2144,8 @@ mod tests {
         assert_eq!(status.state, StandbyState::Watching);
         assert_eq!(status.applied_seq_id, snapshot_sequence_id);
         assert_eq!(status.primary_seq_id, snapshot_sequence_id);
+        assert_eq!(status.lag_entries, 0);
+        assert!(!status.is_syncing);
         service.stop();
     }
 

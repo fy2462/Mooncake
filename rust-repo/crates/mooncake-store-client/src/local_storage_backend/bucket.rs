@@ -664,9 +664,7 @@ impl BucketStorageBackend {
         }
         let mut reserved = self.reservations.names.lock();
         if reserved.contains_key(storage_key) {
-            return Err(StoreError::Internal(format!(
-                "bucket key {storage_key:?} is busy"
-            )));
+            return Err(StoreError::ObjectExists(storage_key.to_string()));
         }
         let previous = state.records.get(storage_key).cloned();
         let target_bucket_id = if let Some(previous) = &previous {
@@ -1313,6 +1311,32 @@ mod tests {
 
     fn one_byte_tasks(count: usize) -> HashMap<String, u64> {
         (0..count).map(|i| (format!("test{i}"), 1)).collect()
+    }
+
+    #[test]
+    fn cpp_parity_storage_backend_test_cpp_storagebackendtest_bucketpendingwriterejectsreentrantduplicate_cc440547()
+     {
+        let root = TempDir::new().unwrap();
+        let mut config = config(&root);
+        config.bucket_keys_limit = 10;
+        config.bucket_size_limit = 8 * 1024;
+        config.quota_bytes = 20 * 1024;
+        let backend = BucketStorageBackend::new(config);
+        let outer_value = vec![b'A'; 3 * 1024];
+        let nested_value = vec![b'B'; 1024];
+
+        let outer_pending = backend
+            .prepare_write("shared_key", outer_value.len() as u64)
+            .unwrap();
+        assert!(matches!(
+            backend.prepare_write("shared_key", nested_value.len() as u64),
+            Err(StoreError::ObjectExists(key)) if key == "shared_key"
+        ));
+
+        backend
+            .commit_write_with_generation("shared_key", &outer_value, outer_pending, Uuid::new_v4())
+            .unwrap();
+        assert_eq!(backend.read_object("shared_key").unwrap(), outer_value);
     }
 
     #[test]
