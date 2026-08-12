@@ -1,5 +1,4 @@
 use super::catalog_snapshot::parse_uuid;
-use super::snapshot::SnapshotObjectStore;
 use super::types::HaError;
 use crate::TenantId;
 use crate::service::TaskEntry;
@@ -13,17 +12,6 @@ use uuid::Uuid;
 
 const TASK_SERIALIZED_FIELDS: usize = 8;
 const MAX_TASK_PAYLOAD_SIZE: u64 = 1024 * 1024 * 1024;
-
-pub(super) fn load_task_manager(
-    object_store: &dyn SnapshotObjectStore,
-    prefix: &str,
-) -> Result<Vec<TaskEntry>, HaError> {
-    match object_store.download_buffer(&format!("{prefix}task_manager")) {
-        Ok(payload) => decode_task_manager(&payload),
-        Err(error) if object_store.is_not_found_error(&error.to_string()) => Ok(Vec::new()),
-        Err(error) => Err(error),
-    }
-}
 
 pub(super) fn decode_task_manager(data: &[u8]) -> Result<Vec<TaskEntry>, HaError> {
     let decoded = decode_zstd_bounded(data, MAX_TASK_PAYLOAD_SIZE)?;

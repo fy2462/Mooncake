@@ -15036,13 +15036,18 @@
     "file": "ha/snapshot/snapshot_child_process_test.cpp",
     "test": "SnapshotChildProcessTest.RestoreWithBackupDir_CreatesBackupFiles"
    },
-   "reason": "No discoverable Rust test asserts the C++ catalog restore backup set of all four payload artifacts.",
+   "reason": "The executable LocalFile/Embedded catalog test publishes and restores a real snapshot with an explicit backup directory, then proves manifest.txt, metadata, segments, and task_manager all exist under mooncake_snapshot_restore_backup and are byte-identical to the selected snapshot payloads.",
    "review": {
     "oracle": "snapshot_child_process_test.cpp RestoreWithBackupDir_CreatesBackupFiles and MasterService restore backup path; Rust service/mod.rs native snapshot backup path",
     "reviewed": true
    },
-   "rust": [],
-   "status": "missing"
+   "rust": [
+    {
+     "file": "mooncake-store-master/tests/test_catalog_snapshot.rs",
+     "test": "cpp_parity_catalog_restore_with_backup_dir_copies_all_four_payloads"
+    }
+   ],
+   "status": "covered"
   },
   {
    "behavior": "Restoring with no backup directory creates no mooncake_snapshot_restore_backup directory anywhere below the test temporary root.",
@@ -15059,13 +15064,18 @@
     "file": "ha/snapshot/snapshot_child_process_test.cpp",
     "test": "SnapshotChildProcessTest.RestoreWithoutBackupDir_NoBackupFiles"
    },
-   "reason": "No discoverable Rust test asserts the absence of restore-backup artifacts when backup configuration is empty.",
+   "reason": "The executable LocalFile/Embedded catalog test publishes and restores the same real snapshot through a provider with no restore-backup directory, then recursively proves mooncake_snapshot_restore_backup was never created under the isolated root.",
    "review": {
     "oracle": "snapshot_child_process_test.cpp RestoreWithoutBackupDir_NoBackupFiles and MasterService restore backup path",
     "reviewed": true
    },
-   "rust": [],
-   "status": "missing"
+   "rust": [
+    {
+     "file": "mooncake-store-master/tests/test_catalog_snapshot.rs",
+     "test": "cpp_parity_catalog_restore_without_backup_dir_creates_no_backup_artifacts"
+    }
+   ],
+   "status": "covered"
   },
   {
    "behavior": "When the newest snapshot metadata is corrupted, restore chooses the previous healthy snapshot, retains its key, and does not partially restore the newer key.",

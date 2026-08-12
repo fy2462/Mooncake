@@ -1937,6 +1937,139 @@ fn test_catalog_provider_factory_publishes_cluster_scoped_snapshot_objects() {
 }
 
 #[test]
+fn cpp_parity_catalog_restore_with_backup_dir_copies_all_four_payloads() {
+    let root = tempdir().unwrap();
+    let provider = create_catalog_backed_snapshot_provider(
+        "",
+        SnapshotObjectStoreType::Local,
+        SnapshotCatalogStoreType::Embedded,
+        Some(root.path().to_path_buf()),
+        None,
+    )
+    .unwrap();
+    let snapshot = empty_loaded_snapshot("20240601_120000_000", 0);
+    let descriptor = provider.publish_loaded_snapshot(&snapshot, 0).unwrap();
+
+    assert!(provider.load_latest_snapshot("").unwrap().is_some());
+
+    let backup = root.path().join("mooncake_snapshot_restore_backup");
+    for (backup_name, source_name) in [
+        ("manifest.txt", "manifest.txt"),
+        ("metadata", "metadata"),
+        ("segments", "segments"),
+        ("task_manager", "task_manager"),
+    ] {
+        let source = root
+            .path()
+            .join(&descriptor.object_prefix)
+            .join(source_name);
+        let copied = backup.join(backup_name);
+        assert!(copied.is_file(), "missing backup {}", copied.display());
+        assert_eq!(
+            std::fs::read(copied).unwrap(),
+            std::fs::read(source).unwrap()
+        );
+    }
+}
+
+#[test]
+fn cpp_parity_catalog_restore_without_backup_dir_creates_no_backup_artifacts() {
+    let root = tempdir().unwrap();
+    let object_store = Arc::new(LocalFileSnapshotObjectStore::new(root.path().to_path_buf()));
+    let catalog = EmbeddedSnapshotCatalogStore::with_object_store(object_store.clone());
+    let provider = CatalogBackedSnapshotProvider::new("", Box::new(catalog), object_store);
+    let snapshot = empty_loaded_snapshot("20240601_120000_001", 0);
+    provider.publish_loaded_snapshot(&snapshot, 0).unwrap();
+
+    assert!(provider.load_latest_snapshot("").unwrap().is_some());
+    assert!(
+        !root
+            .path()
+            .join("mooncake_snapshot_restore_backup")
+            .exists()
+    );
+    fn contains_restore_backup(dir: &std::path::Path) -> bool {
+        std::fs::read_dir(dir)
+            .unwrap()
+            .filter_map(Result::ok)
+            .any(|entry| {
+                entry.file_name() == "mooncake_snapshot_restore_backup"
+                    || (entry.path().is_dir() && contains_restore_backup(&entry.path()))
+            })
+    }
+    assert!(!contains_restore_backup(root.path()));
+}
+
+#[test]
+fn catalog_restore_backup_tracks_first_usable_fallback_candidate() {
+    let root = tempdir().unwrap();
+    let provider = create_catalog_backed_snapshot_provider(
+        "",
+        SnapshotObjectStoreType::Local,
+        SnapshotCatalogStoreType::Embedded,
+        Some(root.path().to_path_buf()),
+        None,
+    )
+    .unwrap();
+    let older = empty_loaded_snapshot("20240601_120000_000", 41);
+    let newer = empty_loaded_snapshot("20240601_120000_001", 42);
+    let older_descriptor = provider.publish_loaded_snapshot(&older, 0).unwrap();
+    let newer_descriptor = provider.publish_loaded_snapshot(&newer, 0).unwrap();
+    std::fs::write(
+        root.path()
+            .join(&newer_descriptor.object_prefix)
+            .join("metadata"),
+        b"corrupt",
+    )
+    .unwrap();
+
+    let loaded = provider.load_latest_snapshot("").unwrap().unwrap();
+    assert_eq!(loaded.snapshot_id, older.snapshot_id);
+    let backup = root.path().join("mooncake_snapshot_restore_backup");
+    for name in ["manifest.txt", "metadata", "segments", "task_manager"] {
+        assert_eq!(
+            std::fs::read(backup.join(name)).unwrap(),
+            std::fs::read(root.path().join(&older_descriptor.object_prefix).join(name)).unwrap(),
+            "backup must come from the selected healthy snapshot: {name}"
+        );
+    }
+}
+
+#[test]
+fn catalog_restore_backup_removes_stale_task_manager_for_legacy_snapshot() {
+    let root = tempdir().unwrap();
+    let provider = create_catalog_backed_snapshot_provider(
+        "",
+        SnapshotObjectStoreType::Local,
+        SnapshotCatalogStoreType::Embedded,
+        Some(root.path().to_path_buf()),
+        None,
+    )
+    .unwrap();
+    let first = empty_loaded_snapshot("20240601_120000_000", 41);
+    let second = empty_loaded_snapshot("20240601_120000_001", 42);
+    provider.publish_loaded_snapshot(&first, 0).unwrap();
+    assert!(provider.load_latest_snapshot("").unwrap().is_some());
+    let task_backup = root
+        .path()
+        .join("mooncake_snapshot_restore_backup/task_manager");
+    assert!(task_backup.is_file());
+
+    let second_descriptor = provider.publish_loaded_snapshot(&second, 0).unwrap();
+    std::fs::remove_file(
+        root.path()
+            .join(&second_descriptor.object_prefix)
+            .join("task_manager"),
+    )
+    .unwrap();
+    let loaded = provider.load_latest_snapshot("").unwrap().unwrap();
+
+    assert_eq!(loaded.snapshot_id, second.snapshot_id);
+    assert!(loaded.tasks.is_empty());
+    assert!(!task_backup.exists());
+}
+
+#[test]
 fn test_catalog_provider_prunes_old_snapshots() {
     let root = tempdir().unwrap();
     let object_store = Arc::new(LocalFileSnapshotObjectStore::new(root.path().to_path_buf()));

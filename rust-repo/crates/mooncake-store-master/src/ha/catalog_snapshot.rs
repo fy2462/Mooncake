@@ -1,4 +1,4 @@
-use super::catalog_task::{encode_task_manager, load_task_manager};
+use super::catalog_task::{decode_task_manager, encode_task_manager};
 use super::snapshot::{
     EmbeddedSnapshotCatalogStore, LoadedSnapshot, LocalFileSnapshotObjectStore,
     RedisSnapshotCatalogStore, S3SnapshotObjectStore, SnapshotCatalogStore,
@@ -76,6 +76,7 @@ pub struct CatalogBackedSnapshotProvider {
     cluster_id: String,
     catalog_store: Box<dyn SnapshotCatalogStore>,
     object_store: Arc<dyn SnapshotObjectStore>,
+    restore_backup_dir: Option<PathBuf>,
 }
 impl CatalogBackedSnapshotProvider {
     pub fn new(
@@ -87,7 +88,13 @@ impl CatalogBackedSnapshotProvider {
             cluster_id: cluster_id.into(),
             catalog_store,
             object_store,
+            restore_backup_dir: None,
         }
+    }
+
+    pub fn with_restore_backup_dir(mut self, backup_dir: Option<PathBuf>) -> Self {
+        self.restore_backup_dir = backup_dir.filter(|path| !path.as_os_str().is_empty());
+        self
     }
 
     /// Probe both catalog reads and object-store write/delete before the
@@ -496,6 +503,7 @@ pub fn create_catalog_backed_snapshot_provider(
     catalog_connstring: Option<&str>,
 ) -> Result<CatalogBackedSnapshotProvider, HaError> {
     let cluster_id = cluster_id.into();
+    let restore_backup_dir = local_root.clone();
     let object_store: Arc<dyn SnapshotObjectStore> = match object_store_type {
         SnapshotObjectStoreType::Local => {
             let root = resolve_local_snapshot_root(
@@ -528,11 +536,10 @@ pub fn create_catalog_backed_snapshot_provider(
             )?)
         }
     };
-    Ok(CatalogBackedSnapshotProvider::new(
-        cluster_id,
-        catalog_store,
-        object_store,
-    ))
+    Ok(
+        CatalogBackedSnapshotProvider::new(cluster_id, catalog_store, object_store)
+            .with_restore_backup_dir(restore_backup_dir),
+    )
 }
 impl CatalogBackedSnapshotProvider {
     fn validate_cluster_id(&self, cluster_id: &str) -> Result<(), HaError> {
@@ -581,7 +588,11 @@ impl CatalogBackedSnapshotProvider {
         Ok(descriptors)
     }
 
-    fn load_descriptor(&self, descriptor: SnapshotDescriptor) -> Result<LoadedSnapshot, HaError> {
+    fn load_descriptor(
+        &self,
+        descriptor: SnapshotDescriptor,
+        backup_if_usable: bool,
+    ) -> Result<LoadedSnapshot, HaError> {
         let prefix = if descriptor.object_prefix.is_empty() {
             format!(
                 "{}{}/",
@@ -596,8 +607,8 @@ impl CatalogBackedSnapshotProvider {
         } else {
             descriptor.manifest_key.clone()
         };
-        let allocator_config_required =
-            validate_manifest(&self.object_store.download_string(&manifest_key)?)?;
+        let manifest = self.object_store.download_string(&manifest_key)?;
+        let allocator_config_required = validate_manifest(&manifest)?;
         let allocator_config =
             load_allocator_config_extension(self.object_store.as_ref(), &prefix)?;
         if allocator_config_required && allocator_config.is_none() {
@@ -637,14 +648,23 @@ impl CatalogBackedSnapshotProvider {
         {
             apply_local_disk_replica_identities_extension(&mut objects, entries)?;
         }
-        let tasks = load_task_manager(self.object_store.as_ref(), &prefix)?;
+        let (tasks, task_payload) = match self
+            .object_store
+            .download_buffer(&format!("{prefix}task_manager"))
+        {
+            Ok(payload) => (decode_task_manager(&payload)?, Some(payload)),
+            Err(error) if self.object_store.is_not_found_error(&error.to_string()) => {
+                (Vec::new(), None)
+            }
+            Err(error) => return Err(error),
+        };
         let mut delayed_replica_releases =
             load_delayed_replica_releases_extension(self.object_store.as_ref(), &prefix)?;
         if delayed_replica_releases.is_empty() {
             delayed_replica_releases =
                 decode_cpp_discarded_replicas(&metadata_payload, &decoded_segments)?;
         }
-        Ok(LoadedSnapshot {
+        let snapshot = LoadedSnapshot {
             snapshot_id: descriptor.snapshot_id,
             snapshot_sequence_id: descriptor.last_included_seq,
             allocator_config,
@@ -662,7 +682,54 @@ impl CatalogBackedSnapshotProvider {
             )?,
             delayed_replica_releases,
             local_disk_segments,
-        })
+        };
+        if backup_if_usable {
+            self.backup_restored_payloads(
+                &manifest,
+                &metadata_payload,
+                &segment_payload,
+                task_payload.as_deref(),
+            );
+        }
+        Ok(snapshot)
+    }
+
+    fn backup_restored_payloads(
+        &self,
+        manifest: &str,
+        metadata: &[u8],
+        segments: &[u8],
+        task_manager: Option<&[u8]>,
+    ) {
+        let Some(root) = &self.restore_backup_dir else {
+            return;
+        };
+        let backup_dir = root.join("mooncake_snapshot_restore_backup");
+        if let Err(error) = std::fs::create_dir_all(&backup_dir) {
+            tracing::warn!(%error, path = %backup_dir.display(), "failed to create snapshot restore backup directory");
+            return;
+        }
+        for (name, payload) in [
+            ("manifest.txt", manifest.as_bytes()),
+            ("metadata", metadata),
+            ("segments", segments),
+        ] {
+            if let Err(error) = std::fs::write(backup_dir.join(name), payload) {
+                tracing::warn!(%error, file = name, "failed to write restored snapshot backup");
+            }
+        }
+        if let Some(payload) = task_manager
+            && let Err(error) = std::fs::write(backup_dir.join("task_manager"), payload)
+        {
+            tracing::warn!(%error, "failed to write restored task-manager backup");
+        } else if task_manager.is_none() {
+            let stale = backup_dir.join("task_manager");
+            if let Err(error) = std::fs::remove_file(&stale)
+                && error.kind() != std::io::ErrorKind::NotFound
+            {
+                tracing::warn!(%error, path = %stale.display(), "failed to remove stale task-manager backup");
+            }
+        }
     }
 
     fn load_catalog_candidates(&self, cluster_id: &str) -> Result<Vec<LoadedSnapshot>, HaError> {
@@ -672,7 +739,7 @@ impl CatalogBackedSnapshotProvider {
         let mut first_error = None;
         for descriptor in descriptors {
             let snapshot_id = descriptor.snapshot_id.clone();
-            match self.load_descriptor(descriptor) {
+            match self.load_descriptor(descriptor, snapshots.is_empty()) {
                 Ok(snapshot) => snapshots.push(snapshot),
                 Err(error) => {
                     tracing::warn!(snapshot_id, %error, "snapshot candidate is unusable");
