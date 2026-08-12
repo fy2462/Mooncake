@@ -2699,6 +2699,11 @@ mod tests {
         calls: Vec<Vec<String>>,
     }
 
+    #[derive(Default)]
+    struct RecordingSuccessEvictionNotifier {
+        calls: Vec<(String, Vec<String>, i32)>,
+    }
+
     #[async_trait::async_trait]
     impl DiskEvictionNotifier for ScriptedEvictionNotifier {
         async fn notify_disk_eviction(
@@ -2731,6 +2736,20 @@ mod tests {
         ) -> StoreResult<Vec<i32>> {
             self.calls.push(keys.to_vec());
             Ok(self.statuses.pop_front().unwrap_or_default())
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl DiskEvictionNotifier for RecordingSuccessEvictionNotifier {
+        async fn notify_disk_eviction(
+            &mut self,
+            tenant_id: &str,
+            keys: &[String],
+            replica_type: i32,
+        ) -> StoreResult<Vec<i32>> {
+            self.calls
+                .push((tenant_id.to_string(), keys.to_vec(), replica_type));
+            Ok(vec![0; keys.len()])
         }
     }
 
@@ -3023,6 +3042,89 @@ mod tests {
             "non-empty recovery must not publish an unreachable endpoint"
         );
         assert!(recovered_local_disk_record_batches(&records, 0).is_err());
+    }
+
+    #[tokio::test]
+    async fn cpp_parity_storage_backend_test_cpp_storagebackendtest_adaptorwatermarkevictionnotifiesrecoveredkeysafterrestart_567ce404()
+     {
+        let root = tempfile::tempdir().unwrap();
+        let config = LocalStorageConfig {
+            root_dir: root.path().to_path_buf(),
+            fsdir: "file-per-key-watermark-restart".to_string(),
+            enable_eviction: true,
+            quota_bytes: 4096,
+        };
+        let expected_values = [
+            ("restart_key_1", vec![b'a'; 512]),
+            ("restart_key_2", vec![b'b'; 512]),
+            ("restart_key_3", vec![b'c'; 512]),
+        ];
+        {
+            let backend = LocalStorageBackend::new_persistent(config.clone());
+            backend.init().unwrap();
+            for (key, value) in &expected_values {
+                backend
+                    .write_object(&local_storage_key("default", key), value)
+                    .unwrap();
+            }
+        }
+
+        let restarted = LocalStorageBackend::new_persistent(config);
+        restarted.init().unwrap();
+        for (key, expected) in &expected_values {
+            assert_eq!(
+                restarted
+                    .read_object(&local_storage_key("default", key))
+                    .unwrap(),
+                *expected
+            );
+        }
+        assert_eq!(restarted.scan_records().unwrap().len(), 3);
+
+        let pending = restarted
+            .prepare_watermark_eviction(1e-12, 0.5e-12)
+            .unwrap();
+        let storage_keys = pending.keys();
+        let mut returned_keys = storage_keys
+            .iter()
+            .map(|storage_key| {
+                parse_recovered_local_storage_key(storage_key)
+                    .unwrap()
+                    .1
+                    .to_string()
+            })
+            .collect::<Vec<_>>();
+        returned_keys.sort();
+        assert_eq!(
+            returned_keys,
+            ["restart_key_1", "restart_key_2", "restart_key_3"]
+        );
+        let mut notifier = RecordingSuccessEvictionNotifier::default();
+        let accepted_storage_keys = notify_evicted_disk_replicas_with(
+            &mut notifier,
+            &storage_keys,
+            proto::replica_descriptor::ReplicaType::LocalDisk as i32,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            accepted_storage_keys,
+            storage_keys.iter().cloned().collect()
+        );
+        assert_eq!(
+            notifier.calls,
+            [(
+                "default".to_string(),
+                vec![
+                    "restart_key_1".to_string(),
+                    "restart_key_2".to_string(),
+                    "restart_key_3".to_string(),
+                ],
+                proto::replica_descriptor::ReplicaType::LocalDisk as i32,
+            )]
+        );
+        restarted.commit_eviction(pending).unwrap();
+        assert!(restarted.scan_records().unwrap().is_empty());
     }
 
     async fn mount_test_local_disk(

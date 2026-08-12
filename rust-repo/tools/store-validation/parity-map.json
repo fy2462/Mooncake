@@ -18261,13 +18261,18 @@
     "file": "storage_backend_test.cpp",
     "test": "StorageBackendTest.AdaptorWatermarkEvictionNotifiesRecoveredKeysAfterRestart"
    },
-   "reason": "Partial evidence only: persistent_backend_preserves_exact_slashed_key_across_restart proves fresh FilePerKey inventory/read recovery; recovered_notifications_are_batched_and_repeatable builds deterministic notifications for three recovered records; and watermark_eviction_commit_deletes_fifo_victims proves the local transaction. No discoverable Rust test feeds three records recovered from the actual backend into an extreme-low watermark eviction and asserts the returned victim set and notified set are both exactly those three keys. Add cpp_parity_storage_backend_test_cpp_storagebackendtest_adaptorwatermarkevictionnotifiesrecoveredkeysafterrestart_567ce404 across LocalStorageBackend recovery, client notification, and watermark commit.",
+   "reason": "Rust storage_local.rs:cpp_parity_storage_backend_test_cpp_storagebackendtest_adaptorwatermarkevictionnotifiesrecoveredkeysafterrestart_567ce404 writes three tenant-scoped 512-byte records to the persistent production FilePerKey backend, opens a fresh backend on the same namespace, verifies all recovered bytes and inventory, then feeds the exact extreme-low-watermark victim storage keys through production notify_evicted_disk_replicas_with. It proves the notifier receives tenant default, user keys restart_key_1..3, and LocalDisk replica type, accepts the exact storage-key set, commits eviction, and observes an empty inventory.",
    "review": {
     "oracle": "mooncake-store/tests/storage_backend_test.cpp:2972-3033, C++ StorageBackendAdaptor scan/watermark path, and Rust LocalStorageBackend persistent scan/watermark plus storage_local recovered notification batching",
     "reviewed": true
    },
-   "rust": [],
-   "status": "missing"
+   "rust": [
+    {
+     "file": "mooncake-store-client/src/client/storage_local.rs",
+     "test": "cpp_parity_storage_backend_test_cpp_storagebackendtest_adaptorwatermarkevictionnotifiesrecoveredkeysafterrestart_567ce404"
+    }
+   ],
+   "status": "covered"
   },
   {
    "behavior": "Handler keys equal result; oldest absent/newest remains.",
