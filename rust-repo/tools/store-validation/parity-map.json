@@ -12253,13 +12253,18 @@
     "file": "ha/oplog/oplog_manager_test.cpp",
     "test": "OpLogManagerTest.SetInitialSequenceIdIgnoredWhenNotEmpty"
    },
-   "reason": "Semantic gap: C++ ignores updates once nonempty, while Rust forwards set_initial_sequence_id to the backend subject to backend conditions.",
+   "reason": "Rust appends and durably commits sequence one through the production worker, then proves set_initial_sequence_id(500) succeeds as a no-op and leaves the latest sequence exactly one. The worker tracks nonzero initial or appended sequence history, preserving the C++ empty-manager gate while keeping the no-op API successful.",
    "review": {
     "oracle": "oplog_manager_test.cpp SetInitialSequenceIdIgnoredWhenNotEmpty and OpLogManager::SetInitialSequenceId; Rust oplog_manager.rs set_initial_sequence_id",
     "reviewed": true
    },
-   "rust": [],
-   "status": "missing"
+   "rust": [
+    {
+     "file": "mooncake-store-master/tests/test_oplog.rs",
+     "test": "cpp_parity_ha_oplog_oplog_manager_test_cpp_oplogmanagertest_setinitialsequenceidignoredwhennotempty"
+    }
+   ],
+   "status": "covered"
   },
   {
    "behavior": "Equal payloads compute equal checksums and different payloads compute different checksums.",

@@ -2,7 +2,7 @@ use super::oplog_wire::validate_record_size;
 use super::{HaError, OpLogRecord, OpLogStore};
 use crate::metrics;
 use parking_lot::{Condvar, Mutex};
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, mpsc};
 use std::time::{Duration, Instant};
 
@@ -163,6 +163,7 @@ pub(crate) struct SequencedOpLogWorker {
     sender: mpsc::SyncSender<Command>,
     latest_assigned: Arc<AtomicU64>,
     latest_committed: Arc<AtomicU64>,
+    has_sequence_history: Arc<AtomicBool>,
     control: Arc<WorkerControl>,
     queue_depth: Arc<AtomicUsize>,
     completion_timeout: Duration,
@@ -181,6 +182,7 @@ impl SequencedOpLogWorker {
         let initial_sequence = store.latest_sequence();
         let latest_assigned = Arc::new(AtomicU64::new(initial_sequence));
         let latest_committed = Arc::new(AtomicU64::new(initial_sequence));
+        let has_sequence_history = Arc::new(AtomicBool::new(initial_sequence != 0));
         let control = Arc::new(WorkerControl {
             state: Mutex::new(WorkerState {
                 terminal: None,
@@ -197,6 +199,7 @@ impl SequencedOpLogWorker {
 
         let thread_assigned = Arc::clone(&latest_assigned);
         let thread_committed = Arc::clone(&latest_committed);
+        let thread_has_sequence_history = Arc::clone(&has_sequence_history);
         let thread_control = Arc::clone(&control);
         let thread_queue_depth = Arc::clone(&queue_depth);
         #[cfg(test)]
@@ -211,6 +214,7 @@ impl SequencedOpLogWorker {
                     thread_config,
                     thread_assigned,
                     thread_committed,
+                    thread_has_sequence_history,
                     thread_control,
                     thread_queue_depth,
                     #[cfg(test)]
@@ -228,6 +232,7 @@ impl SequencedOpLogWorker {
             sender,
             latest_assigned,
             latest_committed,
+            has_sequence_history,
             control,
             queue_depth,
             completion_timeout: config.completion_timeout,
@@ -587,6 +592,7 @@ fn run_worker(
     config: OpLogWorkerConfig,
     latest_assigned: Arc<AtomicU64>,
     latest_committed: Arc<AtomicU64>,
+    has_sequence_history: Arc<AtomicBool>,
     control: Arc<WorkerControl>,
     queue_depth: Arc<AtomicUsize>,
     #[cfg(test)] test_hooks: Arc<WorkerTestHooks>,
@@ -644,12 +650,18 @@ fn run_worker(
                 sequence_id,
                 completion,
             } => {
-                let result =
+                let result = if has_sequence_history.load(Ordering::Acquire) {
+                    Ok(())
+                } else {
                     execute_backend_call(&control, || store.update_latest_sequence_id(sequence_id))
                         .map(|()| {
                             latest_assigned.store(sequence_id, Ordering::Release);
                             latest_committed.store(sequence_id, Ordering::Release);
-                        });
+                            if sequence_id != 0 {
+                                has_sequence_history.store(true, Ordering::Release);
+                            }
+                        })
+                };
                 if finish_backend_command(result, completion, &control, &receiver, &queue_depth) {
                     return;
                 }
@@ -764,6 +776,7 @@ fn run_worker(
                 })
             }) {
                 Ok(sequence_id) => {
+                    has_sequence_history.store(true, Ordering::Release);
                     let expected = latest_assigned
                         .load(Ordering::Acquire)
                         .checked_add(1)
@@ -1513,6 +1526,7 @@ mod tests {
     fn updating_initial_sequence_changes_the_next_assigned_sequence() {
         let worker = SequencedOpLogWorker::start(Box::new(InMemoryOpLog::new(100)), test_config());
         assert_eq!(worker.update_latest_sequence_id(40), Ok(()));
+        assert_eq!(worker.update_latest_sequence_id(50), Ok(()));
         assert_eq!(worker.max_sequence_id(), Ok(40));
         assert_eq!(worker.latest_assigned(), 40);
         assert_eq!(worker.latest_committed(), 40);

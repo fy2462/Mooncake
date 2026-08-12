@@ -978,6 +978,18 @@ fn cpp_parity_ha_oplog_oplog_manager_test_cpp_oplogmanagertest_testsequenceidinc
 }
 
 #[test]
+fn cpp_parity_ha_oplog_oplog_manager_test_cpp_oplogmanagertest_setinitialsequenceidignoredwhennotempty()
+ {
+    let manager = OpLogManager::new(Some(Box::new(InMemoryOpLog::new(4))), 7);
+    let first = manager.append_and_persist("value1".to_string()).unwrap();
+    assert_eq!(first, 1);
+    assert_eq!(manager.latest_sequence(), first);
+
+    assert_eq!(manager.set_initial_sequence_id(500), Ok(()));
+    assert_eq!(manager.latest_sequence(), first);
+}
+
+#[test]
 fn cpp_parity_ha_oplog_oplog_manager_test_cpp_oplogmanagertest_testconcurrentappend() {
     const THREADS: usize = 8;
     const PER_THREAD: usize = 1_000;
