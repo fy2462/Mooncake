@@ -347,9 +347,14 @@ impl MasterServiceImpl {
         let mut removed_count = 0i64;
         for key in keys {
             let _mutation_guard = self.state.key_mutations.lock(&key);
-            if let Some((_, object)) = self.state.objects.remove(&key) {
+            if self.state.objects.contains_key(&key) {
+                self.persist_remove_before_cleanup(&key)?;
+                let (_, object) = self
+                    .state
+                    .objects
+                    .remove(&key)
+                    .expect("key mutation guard preserves object after durable remove");
                 if let Err(status) = self.cleanup_removed_object(&key, &object) {
-                    self.state.objects.insert(key, object);
                     return Err(status);
                 }
                 removed_count += 1;

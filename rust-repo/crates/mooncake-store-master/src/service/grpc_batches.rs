@@ -597,12 +597,17 @@ impl MasterServiceImpl {
                 continue;
             }
             drop(object);
-            let Some((_, object)) = self.state.objects.remove(&key) else {
+            if !self.state.objects.contains_key(&key) {
                 statuses.push(BatchStatus::KeyNotFound.into());
                 continue;
-            };
+            }
+            self.persist_remove_before_cleanup(&key)?;
+            let (_, object) = self
+                .state
+                .objects
+                .remove(&key)
+                .expect("key mutation guard preserves object after durable remove");
             if let Err(status) = self.cleanup_removed_object(&key, &object) {
-                self.state.objects.insert(key, object);
                 return Err(status);
             }
             self.publish_kv_removed(&key, &object);

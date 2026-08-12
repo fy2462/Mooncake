@@ -242,13 +242,20 @@ impl MasterServiceImpl {
                 return Err(Status::failed_precondition("replica is not ready"));
             }
         }
-        let Some((_, object)) = self.state.objects.remove(&scoped_key) else {
+        if !self.state.objects.contains_key(&scoped_key) {
             return Err(Status::not_found("key not found"));
-        };
-        // 先从目录摘除可以阻止新的读者获得该对象；若 allocator/后台索引清理失败，
-        // 必须把原 ObjectEntry 放回，避免“RPC 失败但对象永久消失”的半提交状态。
+        }
+        self.persist_remove_before_cleanup(&scoped_key)?;
+        let (_, object) = self
+            .state
+            .objects
+            .remove(&scoped_key)
+            .expect("key mutation guard preserves object after durable remove");
+        // Once the durable tombstone succeeds, cleanup failure must remain a
+        // fenced authoritative removal. Re-inserting descriptors after quota,
+        // index, task, or allocator cleanup may have partially committed would
+        // resurrect an object that recovery will correctly keep deleted.
         if let Err(status) = self.cleanup_removed_object(&scoped_key, &object) {
-            self.state.objects.insert(scoped_key, object);
             return Err(status);
         }
         self.publish_kv_removed(&scoped_key, &object);
@@ -297,9 +304,14 @@ impl MasterServiceImpl {
                     continue;
                 }
             }
-            if let Some((_, object)) = self.state.objects.remove(&key) {
+            if self.state.objects.contains_key(&key) {
+                self.persist_remove_before_cleanup(&key)?;
+                let (_, object) = self
+                    .state
+                    .objects
+                    .remove(&key)
+                    .expect("key mutation guard preserves object after durable remove");
                 if let Err(status) = self.cleanup_removed_object(&key, &object) {
-                    self.state.objects.insert(key, object);
                     return Err(status);
                 }
                 self.publish_kv_removed(&key, &object);

@@ -271,40 +271,30 @@ impl MasterServiceImpl {
         Ok(Some(snapshot))
     }
 
-    pub(crate) fn cleanup_removed_object(
-        &self,
-        scoped_key: &str,
-        object: &ObjectEntry,
-    ) -> Result<(), Status> {
+    pub(crate) fn persist_remove_before_cleanup(&self, scoped_key: &str) -> Result<(), Status> {
         if let Err(error) = self.oplog_manager.record_remove_durable(scoped_key) {
             self.state.fence_after_durability_failure("remove", &error);
             return Err(Status::unavailable(format!(
                 "failed to persist remove oplog: {error}"
             )));
         }
+        Ok(())
+    }
+
+    pub(crate) fn cleanup_removed_object(
+        &self,
+        scoped_key: &str,
+        object: &ObjectEntry,
+    ) -> Result<(), Status> {
         for mut entry in self.state.client_objects.iter_mut() {
             entry.value_mut().remove(scoped_key);
         }
-        if let Err(status) = self.account_removed_object_quota(object) {
-            let mut restored = object.clone();
-            restored.memory_cache_total_accounted = false;
-            restored.disk_cache_total_accounted = false;
-            restored.disk_allocated_bytes_accounted = 0;
-            sync_cache_total_accounting(&mut restored);
-            return Err(status);
-        }
+        self.account_removed_object_quota(object)?;
         self.state.processing_keys.remove(scoped_key);
         self.state.replication_tasks.remove(scoped_key);
         clear_offloading_task(&self.state, scoped_key);
         cancel_promotion_task(&self.state, scoped_key);
-        if let Err(status) = release_object_replicas(&self.state, scoped_key, &object.replicas) {
-            let mut restored = object.clone();
-            restored.memory_cache_total_accounted = false;
-            restored.disk_cache_total_accounted = false;
-            restored.disk_allocated_bytes_accounted = 0;
-            sync_cache_total_accounting(&mut restored);
-            return Err(status);
-        }
+        release_object_replicas(&self.state, scoped_key, &object.replicas)?;
         Ok(())
     }
 
