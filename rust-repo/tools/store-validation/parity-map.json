@@ -12289,13 +12289,14 @@
     "file": "ha/oplog/oplog_manager_test.cpp",
     "test": "OpLogManagerTest.TestPersistEntry"
    },
-   "reason": "Semantic gap: C++ returns INTERNAL_ERROR without a store, while Rust submit_payload returns Ok(0) when no worker exists.",
+   "reason": "This oracle consumes the C++-only AllocateEntry/PersistEntry split: AllocateEntry first reserves and buffers a private in-memory OpLogEntry, then PersistEntry reports INTERNAL_ERROR because no backend is attached. Rust deliberately has no pre-persistence reservation object or public PersistEntry operation; SequencedOpLogWorker assigns and durably commits a sequence inside one serialized command, while a manager with HA disabled is an explicit successful no-op boundary. Fabricating PersistEntry solely for this test would weaken Rust's no-gap durable ordering contract rather than validate a product API.",
    "review": {
+    "na_category": "absent-rust-product-boundary",
     "oracle": "oplog_manager_test.cpp TestPersistEntry and OpLogManager::PersistEntry; Rust oplog_manager.rs submit_payload",
     "reviewed": true
    },
    "rust": [],
-   "status": "missing"
+   "status": "not-applicable"
   },
   {
    "behavior": "AppendAndPersist without a configured store returns failed INTERNAL_ERROR after allocating the entry.",
@@ -12311,7 +12312,7 @@
     "file": "ha/oplog/oplog_manager_test.cpp",
     "test": "OpLogManagerTest.TestAppendAndPersist"
    },
-   "reason": "Semantic gap: C++ reserves/buffers before failed persistence; Rust append_and_persist reaches the no-worker Ok(0) path and exposes no pre-persist allocation.",
+   "reason": "Semantic gap: the public Rust OpLogManager::append_and_persist reaches submit_payload's disabled-HA Ok(0) path when no worker/store exists, while the corresponding public C++ AppendAndPersist returns INTERNAL_ERROR after allocating its entry.",
    "review": {
     "oracle": "oplog_manager_test.cpp TestAppendAndPersist and OpLogManager::AppendAndPersist; Rust oplog_manager.rs append_and_persist/submit_payload",
     "reviewed": true
@@ -12673,7 +12674,7 @@
     "file": "ha/oplog/oplog_manager_test.cpp",
     "test": "OpLogManagerTest.TestSequenceIdWrapAround"
    },
-   "reason": "Semantic gap: Rust checked_add rejects sequence exhaustion at u64::MAX rather than wrapping.",
+   "reason": "Intentional safety divergence remains: Rust's production SequencedOpLogWorker uses checked_add and rejects sequence exhaustion at UINT64_MAX instead of publishing sequence zero, while C++ Append wraps to zero and IsSequenceNewer treats it as newer.",
    "review": {
     "oracle": "oplog_manager_test.cpp TestSequenceIdWrapAround and IsSequenceNewer; Rust oplog_etcd.rs assign_buffered_sequences/oplog_worker.rs checked_add",
     "reviewed": true
