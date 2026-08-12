@@ -29306,13 +29306,18 @@
     "file": "ha/standby/hot_standby_service_test.cpp",
     "test": "HotStandbyServiceTest.TestStateTransition_SyncFailed"
    },
-   "reason": "Production prerequisite: make etcd initial catch-up complete or fail before start_standby returns, with an unappliable expected record producing exact HaError::InvalidBackend(\"standby initial sync rejected sequence 1\") and Failed status in hot_standby.rs/ha/standby.rs. Add cpp_parity_etcd_initial_sync_failure_aborts_start to tests/test_ha_hot_standby_service.rs; in a unique live-etcd namespace acquire the primary via LeaderCoordinator, assert its real LeadershipSession matches read_current_view, write malformed sequence 1 only through the current-view election-fenced EtcdOpLogStore, and assert a stale/old-view writer is rejected. Start the production standby under test with no candidate LeadershipSession or lease and assert the exact error, Failed with zero sequences and disconnected/not-syncing, no Serving, and joined follower cleanup; release the primary LeadershipSession and lease/keepalive, assert no current view, and delete all namespace keys. Existing in-memory asynchronous failure tests do not prove this production result.",
+   "reason": "The C++ etcd branch is unconditionally GTEST_SKIP; its executable non-etcd branch only requires Start to return INTERNAL_ERROR safely. Rust enables production oplog following without configuring a store, receives the exact InvalidBackend missing-store error category, enters Failed disconnected/not-syncing, and creates no replication worker. This row does not claim the skipped real-etcd synchronization-failure intent.",
    "review": {
-    "oracle": "mooncake-store/tests/ha/standby/hot_standby_service_test.cpp:188-201 and HotStandbyService::StartOplogFollowingLocked",
+    "oracle": "mooncake-store/tests/ha/standby/hot_standby_service_test.cpp:188-201 executable non-etcd branch; Rust hot_standby.rs cpp_parity_ha_standby_hot_standby_service_test_cpp_hotstandbyservicetest_teststatetransition_syncfailed",
     "reviewed": true
    },
-   "rust": [],
-   "status": "missing"
+   "rust": [
+    {
+     "file": "mooncake-store-master/src/hot_standby.rs",
+     "test": "cpp_parity_ha_standby_hot_standby_service_test_cpp_hotstandbyservicetest_teststatetransition_syncfailed"
+    }
+   ],
+   "status": "covered"
   },
   {
    "behavior": "A fresh standby sync status reports applied sequence 0, primary sequence 0, lag 0, is_syncing false, is_connected false, and state STOPPED.",
@@ -29329,13 +29334,18 @@
     "file": "ha/standby/hot_standby_service_test.cpp",
     "test": "HotStandbyServiceTest.TestGetSyncStatus_InitialState"
    },
-   "reason": "Production prerequisite: expose the controller's raw StandbySyncStatus as a supported read-only runtime-status boundary in ha/standby.rs. Add cpp_parity_fresh_controller_sync_status_is_all_zero_and_stopped to tests/test_ha.rs; construct the production etcd-capable controller without starting it and assert applied_seq_id=0, primary_seq_id=0, lag_entries=0, is_syncing=false, is_connected=false, and state=Stopped exactly. Struct construction and mapping tests are not a fresh runtime read.",
+   "reason": "Rust constructs a fresh production HotStandbyService and calls its public sync_status runtime accessor before start. The exact six-field matrix matches C++: applied=0, primary=0, lag=0, not syncing, not connected, and Stopped; no constructed status DTO or store-level value is substituted.",
    "review": {
-    "oracle": "mooncake-store/tests/ha/standby/hot_standby_service_test.cpp:203-211 and HotStandbyService::GetSyncStatus",
+    "oracle": "mooncake-store/tests/ha/standby/hot_standby_service_test.cpp:203-211 and HotStandbyService::GetSyncStatus; Rust hot_standby.rs cpp_parity_ha_standby_hot_standby_service_test_cpp_hotstandbyservicetest_testgetsyncstatus_initialstate",
     "reviewed": true
    },
-   "rust": [],
-   "status": "missing"
+   "rust": [
+    {
+     "file": "mooncake-store-master/src/hot_standby.rs",
+     "test": "cpp_parity_ha_standby_hot_standby_service_test_cpp_hotstandbyservicetest_testgetsyncstatus_initialstate"
+    }
+   ],
+   "status": "covered"
   },
   {
    "behavior": "After Start fails in a build without etcd support, GetSyncStatus reports state FAILED; the etcd activity branch is skipped.",
