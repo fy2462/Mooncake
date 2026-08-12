@@ -33753,13 +33753,18 @@
     "file": "master_metrics_test.cpp",
     "test": "MasterMetricsTest.BatchRequestTest"
    },
-   "reason": "Production prerequisite: add the missing batch GetReplicaList/PutStart accounting dimensions and instrument all five batch handlers in mooncake-store-master/src/metrics/batch.rs and service/grpc_batches.rs. Add cpp_parity_batch_request_metric_matrix to mooncake-store-master/tests/test_master_metrics.rs; under the metrics lock, mount the 64-MiB segment, then assert this exact cumulative matrix (each tuple is requests/failures/partial/items/failed-items): first three-key BatchExist result size 3 => Exist 1/0/0/3/0; first three-key BatchPutStart size 3 => PutStart 1/0/0/3/0; first three-key failed BatchGetReplicaList size 3 => GetReplicaList 1/1/0/3/3; three-key BatchPutEnd size 3 => PutEnd 1/0/0/3/0; second three-key BatchExist size 3 => Exist 2/0/0/6/0; successful second three-key BatchGetReplicaList size 3 => GetReplicaList 2/1/0/6/3; failed three-key BatchPutRevoke size 3 => PutRevoke 1/1/0/3/3; after appending test_key4/512, partial four-key BatchGetReplicaList size 4 => GetReplicaList 3/1/1/10/4; partial four-key BatchPutStart size 4 => PutStart 2/0/1/7/3.",
+   "reason": "Rust test_master_metrics.rs:cpp_parity_master_metrics_test_cpp_mastermetricstest_batchrequesttest runs in an exact fresh child process and executes the C++ 64-MiB Memory-segment fixture with test_key1/2/3 sized 1024/2048/512, then adds test_key4 sized 512. Through the real BatchExistKey, BatchPutStart, BatchGetReplicaList, BatchPutEnd, and BatchPutRevoke RPCs it proves every response length/status shape and the exact cumulative request/partial/failure/item/failed-item matrices: Exist 1/0/0/3/0 then 2/0/0/6/0; PutStart 1/0/0/3/0 then 2/1/0/7/3; Get 1/0/1/3/3, 2/0/1/6/3, then 3/1/1/10/4; PutEnd 1/0/0/3/0; PutRevoke 1/0/1/3/3. Production record_batch_outcome centralizes all-failed versus partial semantics without changing business statuses.",
    "review": {
     "oracle": "mooncake-store/tests/master_metrics_test.cpp:482-598 and mooncake-store/src/master_service.cpp batch handlers",
     "reviewed": true
    },
-   "rust": [],
-   "status": "missing"
+   "rust": [
+    {
+     "file": "mooncake-store-master/tests/test_master_metrics.rs",
+     "test": "cpp_parity_master_metrics_test_cpp_mastermetricstest_batchrequesttest"
+    }
+   ],
+   "status": "covered"
   },
   {
    "behavior": "With offload enabled and Memory plus LocalDisk mounted, C++-compatible offload of a 4,096-byte object increases allocated file size by exactly 4,096 from baseline, and successful Remove restores the baseline.",

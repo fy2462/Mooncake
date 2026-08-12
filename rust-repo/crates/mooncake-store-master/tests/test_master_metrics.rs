@@ -63,6 +63,276 @@ async fn mount_memory_segment(service: &MasterServiceImpl, client_id: Uuid, name
     .unwrap();
 }
 
+fn batch_matrix(snapshot: &metrics::MasterMetricSnapshot, operation: &str) -> [u64; 5] {
+    match operation {
+        "exist" => [
+            snapshot.batch_exist_key_requests,
+            snapshot.batch_exist_key_partial_successes,
+            snapshot.batch_exist_key_failures,
+            snapshot.batch_exist_key_items,
+            snapshot.batch_exist_key_failed_items,
+        ],
+        "get" => [
+            snapshot.batch_get_replica_list_requests,
+            snapshot.batch_get_replica_list_partial_successes,
+            snapshot.batch_get_replica_list_failures,
+            snapshot.batch_get_replica_list_items,
+            snapshot.batch_get_replica_list_failed_items,
+        ],
+        "put_start" => [
+            snapshot.batch_put_start_requests,
+            snapshot.batch_put_start_partial_successes,
+            snapshot.batch_put_start_failures,
+            snapshot.batch_put_start_items,
+            snapshot.batch_put_start_failed_items,
+        ],
+        "put_end" => [
+            snapshot.batch_put_end_requests,
+            snapshot.batch_put_end_partial_successes,
+            snapshot.batch_put_end_failures,
+            snapshot.batch_put_end_items,
+            snapshot.batch_put_end_failed_items,
+        ],
+        "put_revoke" => [
+            snapshot.batch_put_revoke_requests,
+            snapshot.batch_put_revoke_partial_successes,
+            snapshot.batch_put_revoke_failures,
+            snapshot.batch_put_revoke_items,
+            snapshot.batch_put_revoke_failed_items,
+        ],
+        _ => panic!("unknown batch metric operation: {operation}"),
+    }
+}
+
+#[test]
+fn cpp_parity_master_metrics_test_cpp_mastermetricstest_batchrequesttest() {
+    const CHILD_MARKER: &str = "MOONCAKE_BATCH_METRICS_CHILD";
+    const TEST_NAME: &str = "cpp_parity_master_metrics_test_cpp_mastermetricstest_batchrequesttest";
+    if std::env::var_os(CHILD_MARKER).is_none() {
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .arg(TEST_NAME)
+            .arg("--exact")
+            .arg("--test-threads=1")
+            .env(CHILD_MARKER, "1")
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "fresh batch metrics child failed\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        return;
+    }
+
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    runtime.block_on(async {
+        let service = MasterServiceImpl::default();
+        let client_id = Uuid::new_v4();
+        let segment = "batch-metrics:1";
+        MasterService::mount_segment(
+            &service,
+            Request::new(proto::MountSegmentRequest {
+                client_id: Some(proto_uuid(client_id)),
+                segment_name: segment.into(),
+                size: 64 * 1024 * 1024,
+                base_addr: 0x3_0000_0000,
+                te_endpoint: String::new(),
+                protocol: String::new(),
+                host_id: String::new(),
+            }),
+        )
+        .await
+        .unwrap();
+        let mut keys = vec!["test_key1".into(), "test_key2".into(), "test_key3".into()];
+        let mut lengths = vec![1024, 2048, 512];
+
+        let exist = MasterService::batch_exist_key(
+            &service,
+            Request::new(proto::BatchExistKeyRequest {
+                keys: keys.clone(),
+                tenant_id: String::new(),
+            }),
+        )
+        .await
+        .unwrap()
+        .into_inner();
+        assert_eq!(exist.results, vec![false; 3]);
+        assert_eq!(
+            batch_matrix(&metrics::master_metric_snapshot(), "exist"),
+            [1, 0, 0, 3, 0]
+        );
+
+        let started = MasterService::batch_put_start(
+            &service,
+            Request::new(proto::BatchPutStartRequest {
+                client_id: Some(proto_uuid(client_id)),
+                keys: keys.clone(),
+                slice_lengths: lengths.clone(),
+                config: Some(replicate_config(segment)),
+                tenant_id: String::new(),
+            }),
+        )
+        .await
+        .unwrap()
+        .into_inner();
+        assert_eq!(started.results.len(), 3);
+        assert!(started.results.iter().all(|result| result.status == 0));
+        assert_eq!(
+            batch_matrix(&metrics::master_metric_snapshot(), "put_start"),
+            [1, 0, 0, 3, 0]
+        );
+
+        let before_end = MasterService::batch_get_replica_list(
+            &service,
+            Request::new(proto::BatchGetReplicaListRequest {
+                keys: keys.clone(),
+                tenant_id: String::new(),
+            }),
+        )
+        .await
+        .unwrap()
+        .into_inner();
+        assert_eq!(before_end.results.len(), 3);
+        assert!(before_end.results.iter().all(|result| result.status != 0));
+        assert_eq!(
+            batch_matrix(&metrics::master_metric_snapshot(), "get"),
+            [1, 0, 1, 3, 3]
+        );
+
+        let ended = MasterService::batch_put_end(
+            &service,
+            Request::new(proto::BatchPutEndRequest {
+                entries: keys
+                    .iter()
+                    .map(|key| proto::PutEndEntry {
+                        client_id: Some(proto_uuid(client_id)),
+                        key: key.clone(),
+                        replica_type: proto::replica_descriptor::ReplicaType::Memory as i32,
+                        tenant_id: String::new(),
+                    })
+                    .collect(),
+            }),
+        )
+        .await
+        .unwrap()
+        .into_inner();
+        assert_eq!(ended.statuses, vec![0; 3]);
+        assert_eq!(
+            batch_matrix(&metrics::master_metric_snapshot(), "put_end"),
+            [1, 0, 0, 3, 0]
+        );
+
+        let exist = MasterService::batch_exist_key(
+            &service,
+            Request::new(proto::BatchExistKeyRequest {
+                keys: keys.clone(),
+                tenant_id: String::new(),
+            }),
+        )
+        .await
+        .unwrap()
+        .into_inner();
+        assert_eq!(exist.results, vec![true; 3]);
+        assert_eq!(
+            batch_matrix(&metrics::master_metric_snapshot(), "exist"),
+            [2, 0, 0, 6, 0]
+        );
+
+        let after_end = MasterService::batch_get_replica_list(
+            &service,
+            Request::new(proto::BatchGetReplicaListRequest {
+                keys: keys.clone(),
+                tenant_id: String::new(),
+            }),
+        )
+        .await
+        .unwrap()
+        .into_inner();
+        assert_eq!(after_end.results.len(), 3);
+        assert!(after_end.results.iter().all(|result| result.status == 0));
+        assert_eq!(
+            batch_matrix(&metrics::master_metric_snapshot(), "get"),
+            [2, 0, 1, 6, 3]
+        );
+
+        let revoked = MasterService::batch_put_revoke(
+            &service,
+            Request::new(proto::BatchPutRevokeRequest {
+                keys: keys.clone(),
+                client_id: Some(proto_uuid(client_id)),
+                replica_type: proto::replica_descriptor::ReplicaType::Memory as i32,
+                tenant_id: String::new(),
+            }),
+        )
+        .await
+        .unwrap()
+        .into_inner();
+        assert_eq!(revoked.statuses.len(), 3);
+        assert!(revoked.statuses.iter().all(|status| *status != 0));
+        assert_eq!(
+            batch_matrix(&metrics::master_metric_snapshot(), "put_revoke"),
+            [1, 0, 1, 3, 3]
+        );
+
+        keys.push("test_key4".into());
+        lengths.push(512);
+        let partial_get = MasterService::batch_get_replica_list(
+            &service,
+            Request::new(proto::BatchGetReplicaListRequest {
+                keys: keys.clone(),
+                tenant_id: String::new(),
+            }),
+        )
+        .await
+        .unwrap()
+        .into_inner();
+        assert_eq!(partial_get.results.len(), 4);
+        assert_eq!(
+            partial_get
+                .results
+                .iter()
+                .filter(|result| result.status == 0)
+                .count(),
+            3
+        );
+        assert_eq!(
+            batch_matrix(&metrics::master_metric_snapshot(), "get"),
+            [3, 1, 1, 10, 4]
+        );
+
+        let partial_start = MasterService::batch_put_start(
+            &service,
+            Request::new(proto::BatchPutStartRequest {
+                client_id: Some(proto_uuid(client_id)),
+                keys,
+                slice_lengths: lengths,
+                config: Some(replicate_config(segment)),
+                tenant_id: String::new(),
+            }),
+        )
+        .await
+        .unwrap()
+        .into_inner();
+        assert_eq!(partial_start.results.len(), 4);
+        assert_eq!(
+            partial_start
+                .results
+                .iter()
+                .filter(|result| result.status == 0)
+                .count(),
+            1
+        );
+        assert_eq!(
+            batch_matrix(&metrics::master_metric_snapshot(), "put_start"),
+            [2, 1, 0, 7, 3]
+        );
+    });
+}
+
 async fn put_complete(service: &MasterServiceImpl, client_id: Uuid, key: &str, segment: &str) {
     MasterService::put_start(
         service,

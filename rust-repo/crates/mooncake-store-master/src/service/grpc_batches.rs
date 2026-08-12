@@ -130,6 +130,16 @@ impl MasterServiceImpl {
             self.state.runtime_config.enable_tenant_quota,
         )?;
         let results = self.batch_replica_lists_for_keys(&tenant_id, &req.keys)?;
+        let failed = results.iter().filter(|result| result.status != 0).count();
+        metrics::record_batch_outcome(
+            results.len(),
+            failed,
+            &metrics::BATCH_GET_REPLICA_LIST_REQUESTS,
+            &metrics::BATCH_GET_REPLICA_LIST_FAILURES,
+            &metrics::BATCH_GET_REPLICA_LIST_PARTIAL_SUCCESSES,
+            &metrics::BATCH_GET_REPLICA_LIST_ITEMS,
+            &metrics::BATCH_GET_REPLICA_LIST_FAILED_ITEMS,
+        );
         Ok(Response::new(proto::BatchGetReplicaListResponse {
             results,
         }))
@@ -439,6 +449,16 @@ impl MasterServiceImpl {
             };
             statuses.push(status.into());
         }
+        let failed = statuses.iter().filter(|status| **status != 0).count();
+        metrics::record_batch_outcome(
+            statuses.len(),
+            failed,
+            &metrics::BATCH_PUT_END_REQUESTS,
+            &metrics::BATCH_PUT_END_FAILURES,
+            &metrics::BATCH_PUT_END_PARTIAL_SUCCESSES,
+            &metrics::BATCH_PUT_END_ITEMS,
+            &metrics::BATCH_PUT_END_FAILED_ITEMS,
+        );
         Ok(Response::new(proto::BatchPutEndResponse { statuses }))
     }
 
@@ -519,6 +539,16 @@ impl MasterServiceImpl {
             self.persist_detached_allocator_replicas(&key, removed, "batch_put_revoke")?;
             statuses.push(BatchStatus::Success.into());
         }
+        let failed = statuses.iter().filter(|status| **status != 0).count();
+        metrics::record_batch_outcome(
+            statuses.len(),
+            failed,
+            &metrics::BATCH_PUT_REVOKE_REQUESTS,
+            &metrics::BATCH_PUT_REVOKE_FAILURES,
+            &metrics::BATCH_PUT_REVOKE_PARTIAL_SUCCESSES,
+            &metrics::BATCH_PUT_REVOKE_ITEMS,
+            &metrics::BATCH_PUT_REVOKE_FAILED_ITEMS,
+        );
         Ok(Response::new(proto::BatchPutRevokeResponse { statuses }))
     }
 

@@ -1,6 +1,25 @@
 use lazy_static::lazy_static;
 use prometheus::IntCounter;
 
+pub(crate) fn record_batch_outcome(
+    total: usize,
+    failed: usize,
+    requests: &IntCounter,
+    failures: &IntCounter,
+    partial_successes: &IntCounter,
+    items: &IntCounter,
+    failed_items: &IntCounter,
+) {
+    requests.inc();
+    items.inc_by(total as u64);
+    failed_items.inc_by(failed as u64);
+    if total > 0 && failed == total {
+        failures.inc();
+    } else if failed > 0 {
+        partial_successes.inc();
+    }
+}
+
 lazy_static! {
     pub static ref BATCH_GET_REPLICA_LIST_REQUESTS: IntCounter = IntCounter::new(
         "mooncake_store_batch_get_replica_list_total",

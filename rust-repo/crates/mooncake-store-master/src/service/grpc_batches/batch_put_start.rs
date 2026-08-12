@@ -259,6 +259,16 @@ impl MasterServiceImpl {
             }
         }
         metrics::PUT_START_REQUESTS.inc_by(req.keys.len() as u64);
+        let failed = results.iter().filter(|result| result.status != 0).count();
+        metrics::record_batch_outcome(
+            results.len(),
+            failed,
+            &metrics::BATCH_PUT_START_REQUESTS,
+            &metrics::BATCH_PUT_START_FAILURES,
+            &metrics::BATCH_PUT_START_PARTIAL_SUCCESSES,
+            &metrics::BATCH_PUT_START_ITEMS,
+            &metrics::BATCH_PUT_START_FAILED_ITEMS,
+        );
         Ok(Response::new(proto::BatchPutStartResponse {
             replicas: all_replicas,
             results,

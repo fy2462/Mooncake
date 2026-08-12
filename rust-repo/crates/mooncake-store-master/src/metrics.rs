@@ -40,6 +40,8 @@ mod batch;
 mod cache;
 mod operations;
 
+pub(crate) use batch::record_batch_outcome;
+
 pub use batch::{
     BATCH_EXIST_KEY_FAILED_ITEMS, BATCH_EXIST_KEY_FAILURES, BATCH_EXIST_KEY_ITEMS,
     BATCH_EXIST_KEY_PARTIAL_SUCCESSES, BATCH_EXIST_KEY_REQUESTS,
