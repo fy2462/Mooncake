@@ -10398,17 +10398,20 @@ mod tenant_quota_parity_tests {
                 .send(delete_service.delete_tenant_quota_policy("tenant-a"))
                 .unwrap();
         });
-        let delete_result = delete_rx
-            .recv_timeout(std::time::Duration::from_millis(200))
-            .unwrap();
-        assert_eq!(
-            delete_result.unwrap_err().code(),
-            tonic::Code::FailedPrecondition
+        assert!(
+            delete_rx
+                .recv_timeout(std::time::Duration::from_millis(200))
+                .is_err()
         );
 
         allocation_barrier.release();
         put.await.unwrap().unwrap();
+        let delete_result = delete_rx
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .expect("policy delete completed after PutStart");
         delete.join().unwrap();
+        let delete_result = delete_result.unwrap_err();
+        assert_eq!(delete_result.code(), tonic::Code::FailedPrecondition);
         let snapshot = service
             .get_tenant_quota_snapshot("tenant-a")
             .unwrap()

@@ -148,6 +148,12 @@ impl MasterServiceImpl {
             checked_requested_memory_quota_charge(req.slice_length, replica_count).map_err(
                 |_| Status::invalid_argument("Memory replica quota charge overflows uint64"),
             )?;
+        // C++ keeps the tenant-policy mutation mutex across a zero-charge
+        // NoF PutStart admission through metadata creation. This closes the
+        // reserve(0)-to-register window in which policy deletion could
+        // otherwise observe an empty tenant and complete first.
+        let _zero_charge_policy_guard = (config.nof_replica_num > 0 && requested_quota_charge == 0)
+            .then(|| self.state.tenant_quota_policy_mutations.lock());
         // Tenant quota eviction locks arbitrary keys from this tenant. Release
         // the requested key first to avoid recursively acquiring the same
         // mutation stripe, then revalidate existence after quota admission.
