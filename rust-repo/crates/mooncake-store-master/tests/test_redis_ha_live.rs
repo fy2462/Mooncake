@@ -1,4 +1,8 @@
-use mooncake_store_master::ha::LeaderCoordinator;
+use mooncake_store_master::ha::{
+    LeaderCoordinator, LocalFileSnapshotObjectStore, RedisSnapshotCatalogStore,
+    SnapshotCatalogStore,
+};
+use std::sync::Arc;
 use uuid::Uuid;
 
 fn live_redis_enabled() -> bool {
@@ -14,6 +18,24 @@ fn live_redis_url() -> String {
 
 fn test_namespace(suffix: &str) -> String {
     format!("ha-redis-test-{suffix}-{}", Uuid::new_v4().simple())
+}
+
+#[test]
+fn cpp_parity_redis_snapshot_catalog_get_latest_returns_empty_when_catalog_missing() {
+    if !live_redis_enabled() {
+        eprintln!("skipping live Redis HA e2e; set MOONCAKE_REDIS_E2E=1 to enable");
+        return;
+    }
+
+    let root = tempfile::tempdir().unwrap();
+    let catalog = RedisSnapshotCatalogStore::new(
+        &live_redis_url(),
+        test_namespace("snapshot-empty"),
+        Arc::new(LocalFileSnapshotObjectStore::new(root.path().to_path_buf())),
+    )
+    .unwrap();
+
+    assert_eq!(catalog.get_latest().unwrap(), None);
 }
 
 #[tokio::test]

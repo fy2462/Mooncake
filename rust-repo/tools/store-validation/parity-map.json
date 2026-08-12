@@ -13958,13 +13958,18 @@
     "file": "ha/snapshot/catalog/backends/redis/redis_snapshot_catalog_store_test.cpp",
     "test": "RedisSnapshotCatalogStoreTest.GetLatestReturnsEmptyWhenCatalogMissing"
    },
-   "reason": "Rust source also maps a missing Redis latest key to Ok(None), but no discoverable Rust test constructs a RedisSnapshotCatalogStore and asserts this empty-catalog result.",
+   "reason": "cpp_parity_redis_snapshot_catalog_get_latest_returns_empty_when_catalog_missing constructs the production RedisSnapshotCatalogStore with a unique namespace and LocalFile object store, connects to the opt-in live Redis endpoint, and asserts an absent latest key returns exact Ok(None). The fixture follows the existing MOONCAKE_REDIS_E2E convention and was executed against an isolated Redis 7 container.",
    "review": {
     "oracle": "redis_snapshot_catalog_store_test.cpp GetLatestReturnsEmptyWhenCatalogMissing and redis_snapshot_catalog_store.cpp GetLatest; Rust snapshot.rs RedisSnapshotCatalogStore::get_latest",
     "reviewed": true
    },
-   "rust": [],
-   "status": "missing"
+   "rust": [
+    {
+     "file": "mooncake-store-master/tests/test_redis_ha_live.rs",
+     "test": "cpp_parity_redis_snapshot_catalog_get_latest_returns_empty_when_catalog_missing"
+    }
+   ],
+   "status": "covered"
   },
   {
    "behavior": "After publishing a snapshot, getting latest returns PERSISTENT_FAIL when the Redis latest id remains but its descriptor object is missing.",
