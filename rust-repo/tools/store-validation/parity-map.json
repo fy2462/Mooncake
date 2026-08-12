@@ -32068,7 +32068,7 @@
     "file": "master_service_tenant_quota_test.cpp",
     "test": "MasterServiceTenantQuotaTest.DeletePolicyWaitsForInFlightAddReplicaBeforeEmptyCheck"
    },
-   "reason": "Production prerequisite: restore classic AddReplica compatibility for an absent LocalDisk-only object after ordinary MountSegment, without requiring Rust-only LocalDisk storage/session/generation fields, and add deterministic operation/save barriers on production-used paths. Add cpp_parity_delete_waits_for_classic_add_replica_then_reports_nonempty to mooncake-store-master/src/service/mod.rs; register tenant-a, call MountSegment only, pause AddReplica for absent cold with caller client_id, size 128, endpoint disk-endpoint, Complete/LocalDisk and no Rust-only storage namespace, start policy deletion using the test policy-save observer, assert no save-start notification arrives during 200 ms, release AddReplica, assert it succeeds, deletion returns Code::FailedPrecondition with tenant not empty, and ExistKey cold is true. The test seam represents the etcd-backed persistence interface; it does not use a file/Redis connector or require a live etcd service.",
+   "reason": "Rust AddReplica classic absent-object compatibility is implemented; the concurrency oracle remains missing because no production-safe deterministic contention seam currently proves deletion cannot complete during the in-flight operation.",
    "review": {
     "oracle": "mooncake-store/tests/master_service_tenant_quota_test.cpp:708-766, C++ AddReplica policy coordination, and Rust classic AddReplica/delete paths",
     "reviewed": true

@@ -350,6 +350,11 @@ impl MasterServiceImpl {
         request: Request<proto::AddReplicaRequest>,
     ) -> Result<Response<proto::AddReplicaResponse>, Status> {
         let req = request.into_inner();
+        let _policy_guard = self
+            .state
+            .runtime_config
+            .enable_tenant_quota
+            .then(|| self.state.tenant_quota_policy_mutations.lock());
         let tenant_id = self.resolve_write_tenant(&req.tenant_id)?;
         let scoped_key = tenant_id.make_scoped_key(&req.key);
         let _mutation_guard = self.state.key_mutations.lock(&scoped_key);
@@ -371,28 +376,61 @@ impl MasterServiceImpl {
         if replica.status != ReplicaStatus::Complete
             || replica.segment_name.is_empty()
             || replica.holder_client_id != Some(client_id)
-            || replica.local_disk_generation_id.is_none()
         {
             return Err(Status::invalid_argument(
                 "AddReplica requires a complete LocalDisk replica held by the caller",
             ));
         }
-        let storage_id = ready_local_disk_storage_for_client(&self.state, client_id)?;
-        if replica.local_disk_storage_id != Some(storage_id) {
-            return Err(Status::permission_denied(
-                "replica does not belong to the caller's LocalDisk storage namespace",
-            ));
-        }
+        let existing_object = self.state.objects.contains_key(&scoped_key);
+        let storage_id = if existing_object {
+            let storage_id = ready_local_disk_storage_for_client(&self.state, client_id)?;
+            if replica.local_disk_storage_id != Some(storage_id)
+                || replica.local_disk_generation_id.is_none()
+            {
+                return Err(Status::permission_denied(
+                    "replica does not belong to the caller's LocalDisk storage namespace",
+                ));
+            }
+            storage_id
+        } else {
+            replica.local_disk_storage_id.unwrap_or(Uuid::nil())
+        };
         if self.state.processing_keys.contains_key(&scoped_key) {
             return Err(Status::failed_precondition("object is being mutated"));
         }
-        let mut object =
-            self.state
-                .objects
-                .get_mut(&scoped_key)
-                .ok_or(Status::failed_precondition(
-                    "AddReplica cannot create a missing object",
-                ))?;
+        let Some(mut object) = self.state.objects.get_mut(&scoped_key) else {
+            if self.state.objects.contains_key(&scoped_key) {
+                return Err(Status::failed_precondition(
+                    "object appeared during AddReplica",
+                ));
+            }
+            let mut classic = ObjectEntry {
+                replicas: vec![replica.clone()],
+                size: replica.size,
+                last_access: SystemTime::now(),
+                hard_pinned: false,
+                data_type: Default::default(),
+                client_id,
+                put_start_time: None,
+                lease_timeout: None,
+                soft_pin_timeout: None,
+                tenant_id: tenant_id.clone(),
+                group_id: String::new(),
+                quota_committed: false,
+                reserved_quota_charge_bytes: 0,
+                committed_quota_charge_bytes: 0,
+                pending_replaced_quota_charge_bytes: 0,
+                memory_cache_total_accounted: false,
+                disk_cache_total_accounted: false,
+                disk_allocated_bytes_accounted: 0,
+                user_key: req.key.clone(),
+            };
+            sync_cache_total_accounting(&mut classic);
+            self.state.objects.insert(scoped_key.clone(), classic);
+            self.register_tenant_metadata_object(&tenant_id);
+            self.persist_object_image_or_remove(&scoped_key, "add_replica_classic_create")?;
+            return Ok(Response::new(proto::AddReplicaResponse {}));
+        };
         if object.size != replica.size {
             return Err(Status::failed_precondition(
                 "LocalDisk replica size does not match authoritative object size",

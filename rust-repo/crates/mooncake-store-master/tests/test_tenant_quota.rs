@@ -1099,6 +1099,72 @@ async fn test_add_replica_rejects_injection_and_offload_counts_zero_charge_metad
 }
 
 #[tokio::test]
+async fn cpp_parity_add_replica_creates_classic_absent_local_disk_object() {
+    let service = MasterServiceImpl::with_runtime_config(MasterRuntimeConfig {
+        enable_tenant_quota: true,
+        enable_offload: true,
+        tenant_quota_connector_uri: temp_policy_uri(),
+        tenant_quota_pool_capacity_bytes: 1_000,
+        ..Default::default()
+    });
+    let client_id = Uuid::new_v4();
+    mount_segment(&service, client_id, "classic-memory:1", 4096).await;
+    service
+        .upsert_tenant_quota_policy("tenant-a", 1_000)
+        .expect("tenant policy");
+
+    MasterService::add_replica(
+        &service,
+        Request::new(proto::AddReplicaRequest {
+            client_id: Some(proto_uuid(client_id)),
+            key: "classic-cold".into(),
+            tenant_id: "tenant-a".into(),
+            replica: Some(proto::ReplicaDescriptor {
+                segment_name: "classic-disk-segment".into(),
+                status: proto::replica_descriptor::ReplicaStatus::Complete as i32,
+                replica_type: proto::replica_descriptor::ReplicaType::LocalDisk as i32,
+                size: 128,
+                holder_client_id: Some(proto_uuid(client_id)),
+                transport_endpoint: "disk-holder:1".into(),
+                ..Default::default()
+            }),
+        }),
+    )
+    .await
+    .expect("classic AddReplica creates absent LocalDisk object");
+
+    let object = service
+        .capture_loaded_snapshot("classic-add-replica")
+        .objects
+        .into_iter()
+        .find(|(key, _)| key == "tenant-a\0classic-cold")
+        .expect("classic AddReplica object persisted")
+        .1;
+    let replicas = object.replicas;
+    assert_eq!(replicas.len(), 1);
+    assert_eq!(replicas[0].size, 128);
+    assert_eq!(
+        replicas[0].replica_type,
+        mooncake_store_core::ReplicaType::LocalDisk
+    );
+    assert_eq!(
+        service
+            .get_tenant_quota_snapshot("tenant-a")
+            .unwrap()
+            .unwrap()
+            .metadata_object_count,
+        1
+    );
+    assert_eq!(
+        service
+            .delete_tenant_quota_policy("tenant-a")
+            .unwrap_err()
+            .code(),
+        Code::FailedPrecondition
+    );
+}
+
+#[tokio::test]
 async fn test_promotion_registers_first_physical_memory_charge() {
     let service = MasterServiceImpl::with_runtime_config(MasterRuntimeConfig {
         enable_tenant_quota: true,
