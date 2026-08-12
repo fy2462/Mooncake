@@ -10391,18 +10391,17 @@ mod tenant_quota_parity_tests {
         });
         allocation_barrier.wait_started();
 
+        let (delete_started_tx, delete_started_rx) = std::sync::mpsc::channel();
         let (delete_tx, delete_rx) = std::sync::mpsc::channel();
         let delete_service = std::sync::Arc::clone(&service);
         let delete = std::thread::spawn(move || {
+            delete_started_tx.send(()).unwrap();
             delete_tx
                 .send(delete_service.delete_tenant_quota_policy("tenant-a"))
                 .unwrap();
         });
-        assert!(
-            delete_rx
-                .recv_timeout(std::time::Duration::from_millis(200))
-                .is_err()
-        );
+        delete_started_rx.recv().unwrap();
+        assert!(delete_rx.try_recv().is_err());
 
         allocation_barrier.release();
         put.await.unwrap().unwrap();

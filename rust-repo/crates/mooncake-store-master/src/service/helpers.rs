@@ -829,7 +829,7 @@ pub(crate) fn allocate_nof_replicas(
         return Err(Status::failed_precondition("no NoF segments mounted"));
     }
     #[cfg(test)]
-    if let Some(barrier) = state.nof_allocation_test_barrier.lock().take() {
+    if let Some(barrier) = state.nof_allocation_test_barrier.lock().as_ref().cloned() {
         barrier.pause();
     }
 

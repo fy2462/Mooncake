@@ -152,7 +152,9 @@ impl MasterServiceImpl {
         // NoF PutStart admission through metadata creation. This closes the
         // reserve(0)-to-register window in which policy deletion could
         // otherwise observe an empty tenant and complete first.
-        let _zero_charge_policy_guard = (config.nof_replica_num > 0 && requested_quota_charge == 0)
+        let zero_charge_policy_guard = (self.state.runtime_config.enable_tenant_quota
+            && config.nof_replica_num > 0
+            && requested_quota_charge == 0)
             .then(|| self.state.tenant_quota_policy_mutations.lock());
         // Tenant quota eviction locks arbitrary keys from this tenant. Release
         // the requested key first to avoid recursively acquiring the same
@@ -296,6 +298,7 @@ impl MasterServiceImpl {
         // 将 key 加入 processing_keys，防止并发 PutStart 冲突
         // Add key to processing_keys to prevent concurrent PutStart conflicts
         self.state.processing_keys.insert(scoped_key.clone(), ());
+        drop(zero_charge_policy_guard);
         // PutStart publishes writable physical descriptors. Persist the exact
         // Allocating image, quota reservation and allocator geometry before
         // returning so a promoted standby cannot reuse those ranges.

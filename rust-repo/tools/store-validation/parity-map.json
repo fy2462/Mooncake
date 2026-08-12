@@ -32092,7 +32092,7 @@
     "file": "master_service_tenant_quota_test.cpp",
     "test": "MasterServiceTenantQuotaTest.DeletePolicyWaitsForZeroChargePutStartMetadataCreate"
    },
-   "reason": "Rust now registers the in-flight NoF PutStart as a tenant metadata object before entering physical allocation, and rolls that accounting back on allocation failure. A deterministic test-only allocation checkpoint pauses the production path, starts policy deletion, verifies it returns TENANT_NOT_EMPTY before allocation resumes, then releases allocation and asserts PutStart success plus the exact snapshot tuple used=0, reserved=0, metadata_object_count=1.",
+   "reason": "Rust now serializes zero-charge NoF PutStart admission with tenant policy deletion: a deterministic allocation checkpoint proves the delete request has reached the policy mutex and remains pending while allocation is paused. After release, PutStart succeeds, deletion returns TENANT_NOT_EMPTY, and the exact snapshot tuple is used=0, reserved=0, metadata_object_count=1.",
    "review": {
     "oracle": "mooncake-store/tests/master_service_tenant_quota_test.cpp:768-822 under USE_NOF and Rust NoF PutStart/quota metadata creation",
     "reviewed": true
