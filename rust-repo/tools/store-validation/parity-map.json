@@ -10276,13 +10276,18 @@
     "file": "ha/oplog/ha_recovery_test.cpp",
     "test": "HaRecoveryTest.SnapshotWithNoSubsequentOpLog"
    },
-   "reason": "Rust snapshot-only bootstrap covers an absent snapshot/zero baseline, while its snapshot-following test includes a later entry; no discoverable elected-etcd/shared-oplog test asserts a durable nonempty snapshot with an empty post-snapshot range.",
+   "reason": "Rust starts the production HotStandbyService with a sequence-10 snapshot containing the exact ten keys key_1 through key_10 and an in-memory oplog whose read_since(10, 1000) is empty. After snapshot bootstrap and oplog-following startup it proves all ten exact keys remain, the object count is still ten, and the latest applied sequence is ten.",
    "review": {
     "oracle": "ha_recovery_test.cpp SnapshotWithNoSubsequentOpLog and MockOpLogStore::ReadOpLogSince; Rust hot_standby.rs snapshot bootstrap/following tests",
     "reviewed": true
    },
-   "rust": [],
-   "status": "missing"
+   "rust": [
+    {
+     "file": "mooncake-store-master/src/hot_standby.rs",
+     "test": "cpp_parity_ha_oplog_ha_recovery_test_cpp_harecoverytest_snapshotwithnosubsequentoplog"
+    }
+   ],
+   "status": "covered"
   },
   {
    "behavior": "With snapshot sequence 10 and oplog entries 15 through 20 pending, one post-timeout ProcessPendingEntries call skips sequence 11, registers sequence 12 as the next gap, and leaves at least the ten snapshot objects intact.",

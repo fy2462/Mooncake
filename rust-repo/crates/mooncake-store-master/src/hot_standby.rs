@@ -1785,6 +1785,76 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn cpp_parity_ha_oplog_ha_recovery_test_cpp_harecoverytest_snapshotwithnosubsequentoplog()
+    {
+        let state = Arc::new(MasterState::empty());
+        let client_id = Uuid::new_v4();
+        let segment = Segment {
+            id: Uuid::new_v4(),
+            name: "snapshot-only:1".into(),
+            base: 0,
+            size: 10 * 1024,
+            te_endpoint: String::new(),
+            protocol: "tcp".into(),
+            host_id: String::new(),
+        };
+        let objects = (1_u64..=10)
+            .map(|index| {
+                let key = format!("key_{index}");
+                (
+                    TenantId::default().make_scoped_key(&key),
+                    snapshot_object(&key, &segment, (index - 1) * 1024, 1024),
+                )
+            })
+            .collect::<Vec<_>>();
+        let snapshot = crate::ha::LoadedSnapshot {
+            snapshot_id: "snap1".into(),
+            snapshot_sequence_id: 10,
+            allocator_config: None,
+            segments: vec![SegmentEntry {
+                segment,
+                used: 10 * 1024,
+                client_id,
+                status: crate::proto::SegmentStatus::Active,
+            }],
+            nof_segments: vec![],
+            objects,
+            tasks: vec![],
+            replication_tasks: vec![],
+            graceful_unmounts: vec![],
+            delayed_replica_releases: vec![],
+            local_disk_segments: vec![],
+        };
+        let mut service = HotStandbyService::new(
+            state.clone(),
+            HotStandbyConfig {
+                enable_snapshot_bootstrap: true,
+                enable_oplog_following: true,
+                oplog_poll_interval_ms: 10,
+                cluster_id: "test_cluster".into(),
+            },
+        );
+        service.set_snapshot_provider(Box::new(StaticSnapshotProvider { snapshot }));
+        let empty_oplog = InMemoryOpLog::new(16);
+        assert!(empty_oplog.read_since(10, 1_000).unwrap().is_empty());
+        service.set_oplog_store(Box::new(empty_oplog));
+
+        service.start().await.unwrap();
+
+        assert_eq!(state.objects.len(), 10);
+        for index in 1..=10 {
+            assert!(
+                state
+                    .objects
+                    .contains_key(&TenantId::default().make_scoped_key(&format!("key_{index}")))
+            );
+        }
+        assert_eq!(service.latest_applied_sequence_id(), 10);
+        assert_eq!(state.objects.len(), 10);
+        service.stop();
+    }
+
+    #[tokio::test]
     async fn test_oplog_bootstrap_falls_back_when_snapshot_load_fails() {
         let state = Arc::new(MasterState::empty());
         let mut service = HotStandbyService::new(
