@@ -12299,7 +12299,7 @@
    "status": "not-applicable"
   },
   {
-   "behavior": "AppendAndPersist without a configured store returns failed INTERNAL_ERROR after allocating the entry.",
+   "behavior": "AppendAndPersist without a configured store returns a failed internal-status result rather than a successful sequence.",
    "boundary": [
     "master",
     "ha",
@@ -12312,13 +12312,18 @@
     "file": "ha/oplog/oplog_manager_test.cpp",
     "test": "OpLogManagerTest.TestAppendAndPersist"
    },
-   "reason": "Semantic gap: the public Rust OpLogManager::append_and_persist reaches submit_payload's disabled-HA Ok(0) path when no worker/store exists, while the corresponding public C++ AppendAndPersist returns INTERNAL_ERROR after allocating its entry.",
+   "reason": "Rust now separates the explicit public append_and_persist boundary from HA-disabled internal mutation recording. With no worker/store, the public operation returns HaError::UnavailableInCurrentStatus (the Rust internal-error category) and does not report sequence zero as success, while typed service mutations retain their deliberate HA-disabled no-op success. The exact unit test also proves the committed sequence remains zero because Rust does not mimic C++ pre-allocation before a failed persist.",
    "review": {
     "oracle": "oplog_manager_test.cpp TestAppendAndPersist and OpLogManager::AppendAndPersist; Rust oplog_manager.rs append_and_persist/submit_payload",
     "reviewed": true
    },
-   "rust": [],
-   "status": "missing"
+   "rust": [
+    {
+     "file": "mooncake-store-master/src/oplog/oplog_manager.rs",
+     "test": "cpp_parity_oplog_manager_test_cpp_oplogmanagertest_testappendandpersist"
+    }
+   ],
+   "status": "covered"
   },
   {
    "behavior": "On an empty manager, setting initial sequence to 100 makes the next durable sequence 101.",

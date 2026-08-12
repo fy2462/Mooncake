@@ -90,8 +90,16 @@ impl OpLogManager {
         self.submit_payload(payload, "legacy_record")
     }
 
-    pub fn append_and_persist(&self, payload: String) -> Result<u64, HaError> {
+    fn persist_payload(&self, payload: String) -> Result<u64, HaError> {
         self.submit_payload(payload, "append_and_persist")
+    }
+
+    pub fn append_and_persist(&self, payload: String) -> Result<u64, HaError> {
+        let Some(worker) = self.worker() else {
+            return Err(HaError::UnavailableInCurrentStatus);
+        };
+        let view_version = self.view_version.load(Ordering::Acquire);
+        worker.submit_durable(payload, view_version, "append_and_persist")
     }
 
     pub fn set_initial_sequence_id(&self, sequence_id: u64) -> Result<(), HaError> {
@@ -169,7 +177,7 @@ impl OpLogManager {
         object: &crate::service::ObjectEntry,
     ) -> Result<u64, HaError> {
         let payload = PutEndMetadataPayloadV3::try_new(key, object)?;
-        self.append_and_persist(encode_put_end_object_image_msgpack(&payload)?)
+        self.persist_payload(encode_put_end_object_image_msgpack(&payload)?)
     }
 
     /// Persist the complete state introduced by CopyStart/MoveStart.
@@ -295,7 +303,7 @@ impl OpLogManager {
             ));
         }
         let task = crate::service::ReplicationTaskSnapshotEntry::capture(key, task, Instant::now());
-        self.append_and_persist(encode_msgpack_record_payload_value(&json!({
+        self.persist_payload(encode_msgpack_record_payload_value(&json!({
             "op": "replication_start",
             "schema_version": 2,
             "key": object_image.key,
@@ -332,7 +340,7 @@ impl OpLogManager {
                 ));
             }
         }
-        self.append_and_persist(encode_msgpack_record_payload_value(&json!({
+        self.persist_payload(encode_msgpack_record_payload_value(&json!({
             "op": "task_state_batch",
             "schema_version": 1,
             "upserts": upserts,
@@ -392,7 +400,7 @@ impl OpLogManager {
                 "object delayed release batch must not be empty".into(),
             ));
         }
-        self.append_and_persist(encode_msgpack_record_payload_value(&json!({
+        self.persist_payload(encode_msgpack_record_payload_value(&json!({
             "op": "object_delayed_release_batch",
             "schema_version": 1,
             "key": key,
@@ -446,7 +454,7 @@ impl OpLogManager {
                     .map(system_time_to_epoch_millis),
             }));
         }
-        self.append_and_persist(encode_msgpack_record_payload_value(&json!({
+        self.persist_payload(encode_msgpack_record_payload_value(&json!({
             "op": "lease_refresh_batch",
             "schema_version": 1,
             "entries": encoded_entries,
@@ -468,7 +476,7 @@ impl OpLogManager {
     }
 
     pub fn record_remove_durable(&self, key: &str) -> Result<u64, HaError> {
-        self.append_and_persist(encode_msgpack_record_payload_value(
+        self.persist_payload(encode_msgpack_record_payload_value(
             &json!({"op": "remove", "schema_version": 1, "key": key}),
         )?)
     }
@@ -488,7 +496,7 @@ impl OpLogManager {
     }
 
     pub fn record_put_revoke_durable(&self, key: &str) -> Result<u64, HaError> {
-        self.append_and_persist(encode_msgpack_record_payload_value(
+        self.persist_payload(encode_msgpack_record_payload_value(
             &json!({"op": "put_revoke", "schema_version": 1, "key": key}),
         )?)
     }
@@ -576,7 +584,7 @@ impl OpLogManager {
         {
             record["identity_version"] = json!(1);
         }
-        self.append_and_persist(encode_msgpack_record_payload_value(&record)?)
+        self.persist_payload(encode_msgpack_record_payload_value(&record)?)
     }
 
     /// Record the durable scheduling intent for a delayed memory-segment
@@ -606,7 +614,7 @@ impl OpLogManager {
             "client_id": client_id.to_string(),
             "deadline_epoch_ms": deadline_epoch_ms,
         }))?;
-        self.append_and_persist(payload)
+        self.persist_payload(payload)
     }
 
     /// Record an unmount-segment mutation.
@@ -633,7 +641,7 @@ impl OpLogManager {
         segment_name: &str,
         segment_id: Uuid,
     ) -> Result<u64, HaError> {
-        self.append_and_persist(encode_msgpack_record_payload_value(&json!({
+        self.persist_payload(encode_msgpack_record_payload_value(&json!({
             "op": "unmount_segment",
             "schema_version": 1,
             "segment_name": segment_name,
@@ -681,7 +689,7 @@ impl OpLogManager {
         te_endpoint: &str,
         client_id: Uuid,
     ) -> Result<u64, HaError> {
-        self.append_and_persist(encode_msgpack_record_payload_value(&json!({
+        self.persist_payload(encode_msgpack_record_payload_value(&json!({
             "op": "mount_nof_segment",
             "schema_version": 1,
             "segment_name": segment_name,
@@ -717,7 +725,7 @@ impl OpLogManager {
         segment_name: &str,
         segment_id: Uuid,
     ) -> Result<u64, HaError> {
-        self.append_and_persist(encode_msgpack_record_payload_value(&json!({
+        self.persist_payload(encode_msgpack_record_payload_value(&json!({
             "op": "unmount_nof_segment",
             "schema_version": 1,
             "segment_name": segment_name,
@@ -768,7 +776,7 @@ impl OpLogManager {
                 })
             })
             .collect::<Vec<_>>();
-        self.append_and_persist(encode_msgpack_record_payload_value(&json!({
+        self.persist_payload(encode_msgpack_record_payload_value(&json!({
             "op": "segment_status_batch",
             "schema_version": 1,
             "entries": entries,
@@ -1261,5 +1269,16 @@ mod tests {
         assert_eq!(manager.cleanup_before(40), Ok(()));
         assert_eq!(manager.replace_with(OpLogManager::new(None, 2)), Ok(()));
         assert_eq!(manager.record_remove_durable("default\0still-no-ha"), Ok(0));
+    }
+
+    #[test]
+    fn cpp_parity_oplog_manager_test_cpp_oplogmanagertest_testappendandpersist() {
+        let manager = OpLogManager::new(None, 1);
+
+        assert_eq!(
+            manager.append_and_persist(String::new()),
+            Err(HaError::UnavailableInCurrentStatus)
+        );
+        assert_eq!(manager.latest_sequence(), 0);
     }
 }
