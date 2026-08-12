@@ -13311,13 +13311,18 @@
     "file": "ha/leadership/leader_label_reconciler_test.cpp",
     "test": "LeaderLabelReconcilerTest.ConvergesToLeaderAfterTransientFailures"
    },
-   "reason": "Rust retries failed K8s pod-label patches source-only, but no discoverable Rust test injects transient set failures and observes eventual leader-label application. This optional K8s component is not an etcd production-serving requirement.",
+   "reason": "Rust parity test cpp_parity_leader_label_reconciler_converges_to_leader_after_transient_failures (rust-repo/crates/mooncake-store-master/src/ha/coordinator/coordinator_k8s.rs) injects three failed set attempts, observes eventual true application within two seconds, and requires more than three calls; verified PASS.",
    "review": {
     "oracle": "leader_label_reconciler_test.cpp ConvergesToLeaderAfterTransientFailures and leader_label_reconciler.h Run; Rust coordinator_k8s.rs run_k8s_label_reconciler/apply_k8s_leader_label",
     "reviewed": true
    },
-   "rust": [],
-   "status": "missing"
+   "rust": [
+    {
+     "file": "mooncake-store-master/src/ha/coordinator/coordinator_k8s.rs",
+     "test": "cpp_parity_leader_label_reconciler_converges_to_leader_after_transient_failures"
+    }
+   ],
+   "status": "covered"
   },
   {
    "behavior": "After a successful leader-label set, transient failures while clearing it eventually converge to a successfully applied clear.",
@@ -13335,13 +13340,18 @@
     "file": "ha/leadership/leader_label_reconciler_test.cpp",
     "test": "LeaderLabelReconcilerTest.ClearsLeaderAfterTransientFailures"
    },
-   "reason": "Rust source uses a JSON null patch to clear and retries errors, but no discoverable Rust test starts from applied leader state, injects clear failures, and observes eventual label removal. This optional K8s component is not an etcd production-serving requirement.",
+   "reason": "Rust parity test cpp_parity_leader_label_reconciler_clears_leader_after_transient_failures (rust-repo/crates/mooncake-store-master/src/ha/coordinator/coordinator_k8s.rs) first converges to true, injects three clear failures, and observes eventual false application within two seconds; verified PASS.",
    "review": {
     "oracle": "leader_label_reconciler_test.cpp ClearsLeaderAfterTransientFailures and leader_label_reconciler.h Run; Rust coordinator_k8s.rs run_k8s_label_reconciler/apply_k8s_leader_label",
     "reviewed": true
    },
-   "rust": [],
-   "status": "missing"
+   "rust": [
+    {
+     "file": "mooncake-store-master/src/ha/coordinator/coordinator_k8s.rs",
+     "test": "cpp_parity_leader_label_reconciler_clears_leader_after_transient_failures"
+    }
+   ],
+   "status": "covered"
   },
   {
    "behavior": "Two immediate desired-state updates from leader to non-leader converge to an applied clear, so the latest desired state wins.",
@@ -13359,13 +13369,18 @@
     "file": "ha/leadership/leader_label_reconciler_test.cpp",
     "test": "LeaderLabelReconcilerTest.LatestDesiredStateWins"
    },
-   "reason": "Rust watch-channel source retains only the latest desired state, but no discoverable Rust test sends competing set then clear updates and asserts final false application, including scheduling around an in-flight patch.",
+   "reason": "Rust parity test cpp_parity_leader_label_reconciler_latest_desired_state_wins (rust-repo/crates/mooncake-store-master/src/ha/coordinator/coordinator_k8s.rs) sends true then false without yielding and requires the applied state to converge exactly to false; verified PASS.",
    "review": {
     "oracle": "leader_label_reconciler_test.cpp LatestDesiredStateWins and leader_label_reconciler.h SetLeader/Run; Rust coordinator_k8s.rs K8sLeaderLabelReconciler::set_leader/run_k8s_label_reconciler",
     "reviewed": true
    },
-   "rust": [],
-   "status": "missing"
+   "rust": [
+    {
+     "file": "mooncake-store-master/src/ha/coordinator/coordinator_k8s.rs",
+     "test": "cpp_parity_leader_label_reconciler_latest_desired_state_wins"
+    }
+   ],
+   "status": "covered"
   },
   {
    "behavior": "Once a leader-label set succeeds and desired state is unchanged, the reconciler makes no further apply calls across repeated retry intervals.",
@@ -13382,13 +13397,18 @@
     "file": "ha/leadership/leader_label_reconciler_test.cpp",
     "test": "LeaderLabelReconcilerTest.StopsCallingOnceConverged"
    },
-   "reason": "Rust source suppresses patches after applied equals desired, but no discoverable Rust test instruments calls after a successful set and proves no extra patches occur over retry intervals.",
+   "reason": "Rust parity test cpp_parity_leader_label_reconciler_stops_calling_once_converged (rust-repo/crates/mooncake-store-master/src/ha/coordinator/coordinator_k8s.rs) records the call count after true is applied, waits twenty five-millisecond retry intervals, and requires the count to remain unchanged; verified PASS.",
    "review": {
     "oracle": "leader_label_reconciler_test.cpp StopsCallingOnceConverged and leader_label_reconciler.h Run; Rust coordinator_k8s.rs run_k8s_label_reconciler",
     "reviewed": true
    },
-   "rust": [],
-   "status": "missing"
+   "rust": [
+    {
+     "file": "mooncake-store-master/src/ha/coordinator/coordinator_k8s.rs",
+     "test": "cpp_parity_leader_label_reconciler_stops_calling_once_converged"
+    }
+   ],
+   "status": "covered"
   },
   {
    "behavior": "A disabled C++ reconciler ignores a leader request, making zero apply calls and leaving no applied state.",
@@ -13406,13 +13426,18 @@
     "file": "ha/leadership/leader_label_reconciler_test.cpp",
     "test": "LeaderLabelReconcilerTest.DisabledNeverApplies"
    },
-   "reason": "Rust represents disabled behavior as no K8s pod identity or a non-K8s coordinator, both source-only no-ops; no discoverable Rust test calls set_k8s_leader_label and asserts no task or API effect. This is component configuration behavior, not K8s serving parity.",
+   "reason": "Rust parity test cpp_parity_leader_label_reconciler_disabled_never_applies (rust-repo/crates/mooncake-store-master/src/ha/coordinator/coordinator_k8s.rs) constructs the shared reconciler seam disabled, proves no sender/task is created, waits twenty retry intervals, and requires zero apply calls with no applied state; verified PASS.",
    "review": {
     "oracle": "leader_label_reconciler_test.cpp DisabledNeverApplies and leader_label_reconciler.h SetLeader; Rust coordinator.rs set_k8s_leader_label and coordinator_k8s.rs set_k8s_leader_label",
     "reviewed": true
    },
-   "rust": [],
-   "status": "missing"
+   "rust": [
+    {
+     "file": "mooncake-store-master/src/ha/coordinator/coordinator_k8s.rs",
+     "test": "cpp_parity_leader_label_reconciler_disabled_never_applies"
+    }
+   ],
+   "status": "covered"
   },
   {
    "behavior": "If a leader-label set commits remotely but reports an error, changing desired state to clear before the slow retry commits the clear and does not leave a stale leader label.",
@@ -13432,13 +13457,18 @@
     "file": "ha/leadership/leader_label_reconciler_test.cpp",
     "test": "LeaderLabelReconcilerTest.AmbiguousSetFailureDoesNotLeaveStaleLeader"
    },
-   "reason": "Rust resets applied state after a patch error and can wake on desired-state change source-only, but has no injectable patch seam or discoverable Rust test for commit-then-set-error followed by clear before retry expiry.",
+   "reason": "Rust parity test cpp_parity_leader_label_reconciler_ambiguous_set_failure_does_not_leave_stale_leader (rust-repo/crates/mooncake-store-master/src/ha/coordinator/coordinator_k8s.rs) injects a commit-then-error for true under a ten-second retry, changes desired to false after observing the commit, and requires false to commit within two seconds; verified PASS.",
    "review": {
     "oracle": "leader_label_reconciler_test.cpp AmbiguousSetFailureDoesNotLeaveStaleLeader and leader_label_reconciler.h Run; Rust coordinator_k8s.rs run_k8s_label_reconciler",
     "reviewed": true
    },
-   "rust": [],
-   "status": "missing"
+   "rust": [
+    {
+     "file": "mooncake-store-master/src/ha/coordinator/coordinator_k8s.rs",
+     "test": "cpp_parity_leader_label_reconciler_ambiguous_set_failure_does_not_leave_stale_leader"
+    }
+   ],
+   "status": "covered"
   },
   {
    "behavior": "If a leader-label clear commits remotely but reports an error, changing desired state to set before the slow retry commits the set and does not leave the current leader unlabeled.",
@@ -13458,13 +13488,18 @@
     "file": "ha/leadership/leader_label_reconciler_test.cpp",
     "test": "LeaderLabelReconcilerTest.AmbiguousClearFailureDoesNotLeaveMissingLabel"
    },
-   "reason": "Rust resets applied state after a patch error and can wake on desired-state change source-only, but has no injectable patch seam or discoverable Rust test for commit-then-clear-error followed by set before retry expiry.",
+   "reason": "Rust parity test cpp_parity_leader_label_reconciler_ambiguous_clear_failure_does_not_leave_missing_label (rust-repo/crates/mooncake-store-master/src/ha/coordinator/coordinator_k8s.rs) converges true, injects a commit-then-error for false under a ten-second retry, changes desired back to true, and requires true to recommit within two seconds; verified PASS.",
    "review": {
     "oracle": "leader_label_reconciler_test.cpp AmbiguousClearFailureDoesNotLeaveMissingLabel and leader_label_reconciler.h Run; Rust coordinator_k8s.rs run_k8s_label_reconciler",
     "reviewed": true
    },
-   "rust": [],
-   "status": "missing"
+   "rust": [
+    {
+     "file": "mooncake-store-master/src/ha/coordinator/coordinator_k8s.rs",
+     "test": "cpp_parity_leader_label_reconciler_ambiguous_clear_failure_does_not_leave_missing_label"
+    }
+   ],
+   "status": "covered"
   },
   {
    "behavior": "Publishing a valid descriptor makes it the latest snapshot and preserves its id, manifest key, object prefix, sequence, view, and creation time when read back.",

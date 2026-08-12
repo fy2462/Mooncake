@@ -8,6 +8,7 @@ use k8s_openapi::apimachinery::pkg::apis::meta::v1::{MicroTime, ObjectMeta};
 use kube::api::{Patch, PatchParams, PostParams, WatchEvent, WatchParams};
 use kube::{Api, Client, ResourceExt};
 use serde_json::json;
+use std::future::Future;
 use std::sync::{Arc, Mutex};
 use tokio::sync::watch;
 use tracing::{error, info, warn};
@@ -26,8 +27,13 @@ pub(super) struct K8sLeaderLabelReconciler {
 
 impl K8sLeaderLabelReconciler {
     pub(super) fn new(pod_identity: K8sPodIdentity) -> Self {
-        let (desired_tx, desired_rx) = watch::channel(false);
-        tokio::spawn(run_k8s_label_reconciler(pod_identity, desired_rx));
+        let pod_identity = Arc::new(pod_identity);
+        let desired_tx =
+            start_label_reconciler(true, K8S_LABEL_RECONCILE_INTERVAL, move |desired| {
+                let pod_identity = Arc::clone(&pod_identity);
+                async move { apply_k8s_leader_label(&pod_identity, desired).await }
+            })
+            .expect("the K8s label reconciler is enabled");
         Self { desired_tx }
     }
 
@@ -83,17 +89,38 @@ pub(super) async fn k8s_pod_api(namespace: &str) -> Result<Api<Pod>, HaError> {
     Ok(Api::namespaced(client, namespace))
 }
 
-async fn run_k8s_label_reconciler(
-    pod_identity: K8sPodIdentity,
+fn start_label_reconciler<Apply, ApplyFuture>(
+    enabled: bool,
+    retry_interval: Duration,
+    apply: Apply,
+) -> Option<watch::Sender<bool>>
+where
+    Apply: Fn(bool) -> ApplyFuture + Send + 'static,
+    ApplyFuture: Future<Output = Result<(), HaError>> + Send + 'static,
+{
+    if !enabled {
+        return None;
+    }
+    let (desired_tx, desired_rx) = watch::channel(false);
+    tokio::spawn(run_label_reconciler(desired_rx, retry_interval, apply));
+    Some(desired_tx)
+}
+
+async fn run_label_reconciler<Apply, ApplyFuture>(
     mut desired_rx: watch::Receiver<bool>,
-) {
+    retry_interval: Duration,
+    apply: Apply,
+) where
+    Apply: Fn(bool) -> ApplyFuture,
+    ApplyFuture: Future<Output = Result<(), HaError>>,
+{
     // Drive the pod label toward the latest desired state. Transient K8s
     // failures keep `applied` unset so the worker retries every second.
     let mut applied: Option<bool> = None;
     loop {
         let desired = *desired_rx.borrow();
         if applied != Some(desired) {
-            match apply_k8s_leader_label(&pod_identity, desired).await {
+            match apply(desired).await {
                 Ok(()) => {
                     applied = Some(desired);
                     continue;
@@ -115,7 +142,7 @@ async fn run_k8s_label_reconciler(
                     return;
                 }
             }
-            _ = tokio::time::sleep(K8S_LABEL_RECONCILE_INTERVAL), if applied.is_none() => {}
+            _ = tokio::time::sleep(retry_interval), if applied.is_none() => {}
         }
     }
 }
@@ -687,12 +714,191 @@ pub(super) fn k8s_acquired_result(
 mod tests {
     use super::{
         active_view_from_k8s_lease, k8s_keepalive_interval, k8s_lease_available_for_acquisition,
-        next_k8s_lease_transition, validate_k8s_session_lease, view_from_k8s_lease,
+        next_k8s_lease_transition, start_label_reconciler, validate_k8s_session_lease,
+        view_from_k8s_lease,
     };
-    use crate::ha::{LeadershipSession, MasterView};
+    use crate::ha::{HaError, LeadershipSession, MasterView};
     use k8s_openapi::api::coordination::v1::{Lease, LeaseSpec};
     use k8s_openapi::apimachinery::pkg::apis::meta::v1::MicroTime;
+    use std::sync::{Arc, Mutex};
     use std::time::Duration;
+    use tokio::sync::watch;
+
+    #[derive(Default)]
+    struct FakeLabelBackendState {
+        call_count: usize,
+        fail_remaining: usize,
+        commit_then_fail_remaining: usize,
+        applied: Option<bool>,
+        committed: Option<bool>,
+    }
+
+    #[derive(Clone, Default)]
+    struct FakeLabelBackend(Arc<Mutex<FakeLabelBackendState>>);
+
+    impl FakeLabelBackend {
+        fn fail_next(&self, count: usize) {
+            self.0.lock().unwrap().fail_remaining = count;
+        }
+
+        fn commit_then_fail_next(&self, count: usize) {
+            self.0.lock().unwrap().commit_then_fail_remaining = count;
+        }
+
+        async fn apply(&self, desired: bool) -> Result<(), HaError> {
+            let mut state = self.0.lock().unwrap();
+            state.call_count += 1;
+            if state.commit_then_fail_remaining > 0 {
+                state.commit_then_fail_remaining -= 1;
+                state.committed = Some(desired);
+                return Err(HaError::InvalidBackend("injected ambiguous failure".into()));
+            }
+            if state.fail_remaining > 0 {
+                state.fail_remaining -= 1;
+                return Err(HaError::InvalidBackend("injected transient failure".into()));
+            }
+            state.committed = Some(desired);
+            state.applied = Some(desired);
+            Ok(())
+        }
+
+        fn call_count(&self) -> usize {
+            self.0.lock().unwrap().call_count
+        }
+
+        fn applied(&self) -> Option<bool> {
+            self.0.lock().unwrap().applied
+        }
+
+        fn committed(&self) -> Option<bool> {
+            self.0.lock().unwrap().committed
+        }
+
+        async fn wait_for_applied(&self, expected: bool) {
+            tokio::time::timeout(Duration::from_secs(2), async {
+                while self.applied() != Some(expected) {
+                    tokio::time::sleep(Duration::from_millis(1)).await;
+                }
+            })
+            .await
+            .unwrap();
+        }
+
+        async fn wait_for_committed(&self, expected: bool) {
+            tokio::time::timeout(Duration::from_secs(2), async {
+                while self.committed() != Some(expected) {
+                    tokio::time::sleep(Duration::from_millis(1)).await;
+                }
+            })
+            .await
+            .unwrap();
+        }
+    }
+
+    fn test_reconciler(
+        enabled: bool,
+        backend: FakeLabelBackend,
+        retry_interval: Duration,
+    ) -> Option<watch::Sender<bool>> {
+        start_label_reconciler(enabled, retry_interval, move |desired| {
+            let backend = backend.clone();
+            async move { backend.apply(desired).await }
+        })
+    }
+
+    #[tokio::test]
+    async fn cpp_parity_leader_label_reconciler_converges_to_leader_after_transient_failures() {
+        let backend = FakeLabelBackend::default();
+        let desired = test_reconciler(true, backend.clone(), Duration::from_millis(5)).unwrap();
+        backend.wait_for_applied(false).await;
+        let baseline = backend.call_count();
+        backend.fail_next(3);
+
+        desired.send(true).unwrap();
+
+        backend.wait_for_applied(true).await;
+        assert!(backend.call_count() >= baseline + 4);
+    }
+
+    #[tokio::test]
+    async fn cpp_parity_leader_label_reconciler_clears_leader_after_transient_failures() {
+        let backend = FakeLabelBackend::default();
+        let desired = test_reconciler(true, backend.clone(), Duration::from_millis(5)).unwrap();
+        desired.send(true).unwrap();
+        backend.wait_for_applied(true).await;
+
+        backend.fail_next(3);
+        desired.send(false).unwrap();
+
+        backend.wait_for_applied(false).await;
+    }
+
+    #[tokio::test]
+    async fn cpp_parity_leader_label_reconciler_latest_desired_state_wins() {
+        let backend = FakeLabelBackend::default();
+        let desired = test_reconciler(true, backend.clone(), Duration::from_millis(5)).unwrap();
+
+        desired.send(true).unwrap();
+        desired.send(false).unwrap();
+
+        backend.wait_for_applied(false).await;
+        assert_eq!(backend.applied(), Some(false));
+    }
+
+    #[tokio::test]
+    async fn cpp_parity_leader_label_reconciler_stops_calling_once_converged() {
+        let backend = FakeLabelBackend::default();
+        let desired = test_reconciler(true, backend.clone(), Duration::from_millis(5)).unwrap();
+        desired.send(true).unwrap();
+        backend.wait_for_applied(true).await;
+
+        let settled = backend.call_count();
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert_eq!(backend.call_count(), settled);
+    }
+
+    #[tokio::test]
+    async fn cpp_parity_leader_label_reconciler_disabled_never_applies() {
+        let backend = FakeLabelBackend::default();
+        let desired = test_reconciler(false, backend.clone(), Duration::from_millis(5));
+
+        assert!(desired.is_none());
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert_eq!(backend.call_count(), 0);
+        assert_eq!(backend.applied(), None);
+    }
+
+    #[tokio::test]
+    async fn cpp_parity_leader_label_reconciler_ambiguous_set_failure_does_not_leave_stale_leader()
+    {
+        let backend = FakeLabelBackend::default();
+        let desired = test_reconciler(true, backend.clone(), Duration::from_secs(10)).unwrap();
+        backend.wait_for_applied(false).await;
+        backend.commit_then_fail_next(1);
+        desired.send(true).unwrap();
+        backend.wait_for_committed(true).await;
+
+        desired.send(false).unwrap();
+
+        backend.wait_for_committed(false).await;
+    }
+
+    #[tokio::test]
+    async fn cpp_parity_leader_label_reconciler_ambiguous_clear_failure_does_not_leave_missing_label()
+     {
+        let backend = FakeLabelBackend::default();
+        let desired = test_reconciler(true, backend.clone(), Duration::from_secs(10)).unwrap();
+        desired.send(true).unwrap();
+        backend.wait_for_committed(true).await;
+
+        backend.commit_then_fail_next(1);
+        desired.send(false).unwrap();
+        backend.wait_for_committed(false).await;
+
+        desired.send(true).unwrap();
+
+        backend.wait_for_committed(true).await;
+    }
 
     fn lease(holder: Option<&str>, transitions: Option<i32>) -> Lease {
         Lease {
