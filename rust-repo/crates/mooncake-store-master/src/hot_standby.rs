@@ -1953,6 +1953,95 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn cpp_parity_ha_oplog_ha_recovery_test_cpp_harecoverytest_snapshotloadfail_fallbacktofullreplay()
+     {
+        let state = Arc::new(MasterState::empty());
+        let segment_id = Uuid::new_v4();
+        let client_id = Uuid::new_v4();
+        let segment = Segment {
+            id: segment_id,
+            name: "full-replay:1".into(),
+            base: 0,
+            size: 20 * 1024,
+            te_endpoint: String::new(),
+            protocol: "tcp".into(),
+            host_id: String::new(),
+        };
+        state.segments.insert(
+            segment_id,
+            SegmentEntry {
+                segment: segment.clone(),
+                used: 0,
+                client_id,
+                status: crate::proto::SegmentStatus::Active,
+            },
+        );
+        state.allocator.write().add_segment(segment, 0, client_id);
+        let mut oplog = InMemoryOpLog::new(32);
+        for index in 1_u64..=20 {
+            let sequence = oplog.append_payload(
+                1,
+                serde_json::json!({
+                    "op": "put_end",
+                    "key": format!("key_{index}"),
+                    "size": 1024,
+                    "client_id": Uuid::nil().to_string(),
+                    "tenant_id": "default",
+                    "group_id": "",
+                    "user_key": format!("key_{index}"),
+                    "replicas": [{
+                        "segment_id": segment_id,
+                        "segment_name": "full-replay:1",
+                        "offset": (index - 1) * 1024,
+                        "size": 1024,
+                        "status": ReplicaStatus::Complete,
+                        "replica_type": ReplicaType::Memory,
+                        "holder_client_id": null,
+                        "local_disk_storage_id": null,
+                        "local_disk_generation_id": null,
+                        "refcnt": 0,
+                        "handle_valid": true,
+                        "base_addr": 0,
+                        "protocol": "tcp"
+                    }],
+                })
+                .to_string(),
+            );
+            assert_eq!(sequence, index);
+        }
+        let mut service = HotStandbyService::new(
+            state.clone(),
+            HotStandbyConfig {
+                enable_snapshot_bootstrap: true,
+                enable_oplog_following: true,
+                oplog_poll_interval_ms: 10,
+                cluster_id: "test_cluster".into(),
+            },
+        );
+        service.set_snapshot_provider(Box::new(FailingSnapshotProvider));
+        service.set_oplog_store(Box::new(oplog));
+        service.start().await.unwrap();
+
+        tokio::time::timeout(std::time::Duration::from_secs(1), async {
+            while service.latest_applied_sequence_id() < 20 {
+                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("standby did not replay full oplog after snapshot failure");
+        assert_eq!(state.objects.len(), 20);
+        for index in 1..=20 {
+            assert!(
+                state
+                    .objects
+                    .contains_key(&TenantId::default().make_scoped_key(&format!("key_{index}")))
+            );
+        }
+        assert_eq!(service.latest_applied_sequence_id(), 20);
+        service.stop();
+    }
+
+    #[tokio::test]
     async fn test_oplog_bootstrap_falls_back_when_snapshot_load_fails() {
         let state = Arc::new(MasterState::empty());
         let mut service = HotStandbyService::new(

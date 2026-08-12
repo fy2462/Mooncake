@@ -10257,13 +10257,18 @@
     "file": "ha/oplog/ha_recovery_test.cpp",
     "test": "HaRecoveryTest.SnapshotLoadFail_FallbackToFullReplay"
    },
-   "reason": "Rust test_oplog_bootstrap_falls_back_when_snapshot_load_fails proves only startup continuation with an empty InMemoryOpLog; no discoverable elected-etcd/shared-oplog test asserts zero baseline and durable full-history replay after snapshot failure.",
+   "reason": "Rust injects a snapshot-provider failure into the production HotStandbyService with an in-memory shared oplog containing exact sequences 1 through 20. After fallback it waits for applied sequence 20 and proves the exact 20 scoped keys were materialized from the zero baseline.",
    "review": {
-    "oracle": "ha_recovery_test.cpp SnapshotLoadFail_FallbackToFullReplay and OpLogApplier::Recover; Rust hot_standby.rs test_oplog_bootstrap_falls_back_when_snapshot_load_fails",
+    "oracle": "ha_recovery_test.cpp SnapshotLoadFail_FallbackToFullReplay and OpLogApplier::Recover; Rust hot_standby.rs cpp_parity_ha_oplog_ha_recovery_test_cpp_harecoverytest_snapshotloadfail_fallbacktofullreplay",
     "reviewed": true
    },
-   "rust": [],
-   "status": "missing"
+   "rust": [
+    {
+     "file": "mooncake-store-master/src/hot_standby.rs",
+     "test": "cpp_parity_ha_oplog_ha_recovery_test_cpp_harecoverytest_snapshotloadfail_fallbacktofullreplay"
+    }
+   ],
+   "status": "covered"
   },
   {
    "behavior": "A nonempty snapshot at sequence 10 remains intact when the shared oplog has no entries after that sequence.",
