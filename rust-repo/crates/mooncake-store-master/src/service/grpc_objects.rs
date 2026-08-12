@@ -473,7 +473,6 @@ impl MasterServiceImpl {
         )?;
         let scoped_key = tenant_id.make_scoped_key(&req.key);
         let exists = self.completed_object_exists_and_grant_lease(&scoped_key)?;
-        metrics::GET_REQUESTS.inc();
         Ok(Response::new(proto::ExistKeyResponse { exists }))
     }
 
@@ -630,66 +629,34 @@ impl MasterServiceImpl {
         &self,
         _request: Request<proto::CalcCacheStatsRequest>,
     ) -> Result<Response<proto::CalcCacheStatsResponse>, Status> {
-        let mut memory_total = 0f64;
-        let mut ssd_total = 0f64;
-        let mut memory_hits = 0f64;
-        let mut ssd_hits = 0f64;
-
-        for entry in self.state.objects.iter() {
-            let has_memory = entry.replicas.iter().any(|replica| {
-                replica.status == ReplicaStatus::Complete
-                    && replica.replica_type == ReplicaType::Memory
-            });
-            let has_ssd = entry.replicas.iter().any(|replica| {
-                replica.status == ReplicaStatus::Complete
-                    && matches!(
-                        replica.replica_type,
-                        ReplicaType::LocalDisk | ReplicaType::Disk | ReplicaType::NoFSsd
-                    )
-            });
-            if has_memory {
-                memory_total += 1.0;
-                if !is_lease_expired(&entry) {
-                    memory_hits += 1.0;
-                }
-            }
-            if has_ssd {
-                ssd_total += 1.0;
-                if !is_lease_expired(&entry) {
-                    ssd_hits += 1.0;
-                }
-            }
-        }
-
-        let memory_hit_rate = if memory_total > 0.0 {
-            memory_hits / memory_total
-        } else {
-            0.0
-        };
-        let ssd_hit_rate = if ssd_total > 0.0 {
-            ssd_hits / ssd_total
-        } else {
-            0.0
-        };
-        let total = memory_total + ssd_total;
-        let hits = memory_hits + ssd_hits;
-        let overall_hit_rate = if total > 0.0 { hits / total } else { 0.0 };
-
+        use crate::metrics::CacheHitStat;
+        let cache_stats = metrics::calculate_cache_stats();
         let mut stats = HashMap::new();
-        stats.insert("memory_hits".to_string(), memory_hits);
-        stats.insert("ssd_hits".to_string(), ssd_hits);
-        stats.insert("memory_total".to_string(), memory_total);
-        stats.insert("ssd_total".to_string(), ssd_total);
-        stats.insert("memory_hit_rate".to_string(), memory_hit_rate);
-        stats.insert("ssd_hit_rate".to_string(), ssd_hit_rate);
-        stats.insert("overall_hit_rate".to_string(), overall_hit_rate);
+        stats.insert(
+            "memory_hits".to_string(),
+            cache_stats[CacheHitStat::MemoryHits],
+        );
+        stats.insert("ssd_hits".to_string(), cache_stats[CacheHitStat::SsdHits]);
+        stats.insert(
+            "memory_total".to_string(),
+            cache_stats[CacheHitStat::MemoryTotal],
+        );
+        stats.insert("ssd_total".to_string(), cache_stats[CacheHitStat::SsdTotal]);
+        stats.insert(
+            "memory_hit_rate".to_string(),
+            cache_stats[CacheHitStat::MemoryHitRate],
+        );
+        stats.insert(
+            "ssd_hit_rate".to_string(),
+            cache_stats[CacheHitStat::SsdHitRate],
+        );
+        stats.insert(
+            "overall_hit_rate".to_string(),
+            cache_stats[CacheHitStat::OverallHitRate],
+        );
         stats.insert(
             "valid_get_rate".to_string(),
-            if self.state.objects.is_empty() {
-                0.0
-            } else {
-                hits / self.state.objects.len() as f64
-            },
+            cache_stats[CacheHitStat::ValidGetRate],
         );
         Ok(Response::new(proto::CalcCacheStatsResponse { stats }))
     }

@@ -50,7 +50,7 @@ pub use batch::{
 };
 pub use cache::{
     FILE_CACHE_HIT_BYTES, FILE_CACHE_HITS, FILE_CACHE_TOTAL, MEM_CACHE_HIT_BYTES, MEM_CACHE_HITS,
-    MEM_CACHE_TOTAL, VALID_GETS,
+    MEM_CACHE_TOTAL, TOTAL_GETS, VALID_GETS,
 };
 pub use operations::{
     ERROR_COUNTER, EXIST_KEY_FAILURES, EXIST_KEY_REQUESTS, GET_BY_REGEX_FAILURES,
@@ -61,6 +61,67 @@ pub use operations::{
     REMOVE_BY_REGEX_REQUESTS, REMOVE_FAILURES, REMOVE_REQUESTS, UNMOUNT_SEGMENT_FAILURES,
     UNMOUNT_SEGMENT_REQUESTS, UPSERT_FAILURES, UPSERT_REQUESTS,
 };
+
+/// Stable C++-compatible cache-stat indices. New values must be appended.
+#[repr(u8)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CacheHitStat {
+    MemoryHits = 0,
+    SsdHits = 1,
+    MemoryTotal = 2,
+    SsdTotal = 3,
+    MemoryHitRate = 4,
+    SsdHitRate = 5,
+    OverallHitRate = 6,
+    ValidGetRate = 7,
+}
+
+impl CacheHitStat {
+    pub const MEMORY_CURRENT_CACHED_OBJECTS: Self = Self::MemoryTotal;
+    pub const SSD_CURRENT_CACHED_OBJECTS: Self = Self::SsdTotal;
+    pub const MEMORY_HITS_PER_CURRENT_CACHED_OBJECT: Self = Self::MemoryHitRate;
+    pub const SSD_HITS_PER_CURRENT_CACHED_OBJECT: Self = Self::SsdHitRate;
+    pub const OVERALL_HITS_PER_CURRENT_CACHED_OBJECT: Self = Self::OverallHitRate;
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct CacheStats([f64; 8]);
+
+impl std::ops::Index<CacheHitStat> for CacheStats {
+    type Output = f64;
+
+    fn index(&self, index: CacheHitStat) -> &Self::Output {
+        &self.0[index as usize]
+    }
+}
+
+fn rounded_ratio(numerator: f64, denominator: f64) -> f64 {
+    if denominator > 0.0 {
+        (numerator / denominator * 100.0).round() / 100.0
+    } else {
+        0.0
+    }
+}
+
+/// Calculate the Store-observed cache statistics exposed by the C++ API.
+/// Hit counters are cumulative while cache totals are current-object gauges,
+/// so the three reuse values are intentionally not bounded by one.
+pub fn calculate_cache_stats() -> CacheStats {
+    let memory_hits = MEM_CACHE_HITS.get() as f64;
+    let ssd_hits = FILE_CACHE_HITS.get() as f64;
+    let memory_total = MEM_CACHE_TOTAL.get() as f64;
+    let ssd_total = FILE_CACHE_TOTAL.get() as f64;
+    CacheStats([
+        memory_hits,
+        ssd_hits,
+        memory_total,
+        ssd_total,
+        rounded_ratio(memory_hits, memory_total),
+        rounded_ratio(ssd_hits, ssd_total),
+        rounded_ratio(memory_hits + ssd_hits, memory_total + ssd_total),
+        rounded_ratio(VALID_GETS.get() as f64, TOTAL_GETS.get() as f64),
+    ])
+}
 
 // =============================================================================
 // Gauges (global state) — 仪表值（全局状态）
@@ -561,6 +622,7 @@ pub fn register_metrics() {
     register_gauge(&MEM_CACHE_TOTAL);
     register_gauge(&FILE_CACHE_TOTAL);
     register_counter(&VALID_GETS);
+    register_counter(&TOTAL_GETS);
 
     register_counter(&PROMOTION_CANDIDATE_RECORDED);
     register_counter(&PROMOTION_CANDIDATE_ADMITTED);

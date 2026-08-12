@@ -33512,13 +33512,18 @@
     "file": "master_metrics_test.cpp",
     "test": "MasterMetricsTest.CalcCacheStatsTest"
    },
-   "reason": "Production prerequisite: expose a production-used Rust cache-stat calculation boundary with the C++ 0..7 discriminants, aliases, and rounded formulas, rather than a new manager wrapper, in mooncake-store-master/src/metrics.rs. Add cpp_parity_cache_stats_discriminants_aliases_and_reuse to mooncake-store-master/tests/test_master_metrics.rs; lock metric globals, record baselines, mount 16 MiB, complete one 1,024-byte Memory object, make successful gets until cumulative Memory hits exceed current objects, and assert every enum value, alias, rounded formula, baseline delta, valid-get bound, and >1.0 result.",
+   "reason": "Rust metrics.rs exposes the production CacheHitStat 0..7 discriminants, C++-compatible alias constants, and calculate_cache_stats over Prometheus hit counters/current-object gauges plus a dedicated TOTAL_GETS counter with the same two-decimal formulas. Production scalar and batch GetReplicaList paths increment TOTAL_GETS before each key outcome, VALID_GETS counts successful keys, ExistKey does not contaminate the ratio, and CalcCacheStats serializes the unified calculation. test_master_metrics.rs::cpp_parity_cache_stats_discriminants_aliases_and_reuse serializes global metrics, asserts every discriminant and alias, checks all four formulas, mounts 16 MiB, completes one 1,024-byte Memory object, drives repeated successful gets plus missing/not-ready/batch lookups, verifies exact counter deltas and the real RPC result, then unmounts the segment to restore inventory gauges.",
    "review": {
-    "oracle": "mooncake-store/tests/master_metrics_test.cpp:273-403 and mooncake-store/src/master_metric_manager.cpp cache-stat calculation",
+    "oracle": "mooncake-store/tests/master_metrics_test.cpp:273-403 and mooncake-store/src/master_metric_manager.cpp cache-stat calculation; Rust metrics.rs CacheHitStat/calculate_cache_stats, grpc_objects_query.rs/grpc_batches.rs lookup accounting, grpc_objects.rs CalcCacheStats RPC, and test_master_metrics.rs cpp_parity_cache_stats_discriminants_aliases_and_reuse",
     "reviewed": true
    },
-   "rust": [],
-   "status": "missing"
+   "rust": [
+    {
+     "file": "mooncake-store-master/tests/test_master_metrics.rs",
+     "test": "cpp_parity_cache_stats_discriminants_aliases_and_reuse"
+    }
+   ],
+   "status": "covered"
   },
   {
    "behavior": "An admin server without a service delegate in standby returns 200 standby from /role and /ha_status, 200 leader JSON with present=true, 127.0.0.1:19000, and view_version 7 from /leader, and 503 bodies containing service plane is not active from /get_all_segments and /get_segments_detail.",

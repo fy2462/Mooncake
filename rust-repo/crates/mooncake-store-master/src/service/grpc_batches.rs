@@ -140,6 +140,7 @@ impl MasterServiceImpl {
         tenant_id: &TenantId,
         keys: &[String],
     ) -> Result<Vec<proto::BatchGetReplicaListResult>, Status> {
+        metrics::TOTAL_GETS.inc_by(keys.len() as u64);
         struct BatchGetHit {
             scoped_key: String,
             first_replica_type: ReplicaType,

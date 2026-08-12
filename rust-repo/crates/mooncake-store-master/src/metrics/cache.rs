@@ -41,4 +41,9 @@ lazy_static! {
         "total valid get requests"
     )
     .unwrap();
+    pub static ref TOTAL_GETS: IntCounter = IntCounter::new(
+        "mooncake_store_total_gets_total",
+        "total scalar and batch replica-list key lookups"
+    )
+    .unwrap();
 }

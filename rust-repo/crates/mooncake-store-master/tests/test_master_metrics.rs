@@ -337,6 +337,289 @@ async fn test_cache_hit_metrics_count_memory_and_local_disk_bytes() {
 }
 
 #[tokio::test]
+async fn cpp_parity_cache_stats_discriminants_aliases_and_reuse() {
+    let _guard = METRICS_TEST_LOCK.lock().unwrap();
+    use metrics::CacheHitStat;
+
+    assert_eq!(CacheHitStat::MemoryHits as u8, 0);
+    assert_eq!(CacheHitStat::SsdHits as u8, 1);
+    assert_eq!(CacheHitStat::MemoryTotal as u8, 2);
+    assert_eq!(CacheHitStat::SsdTotal as u8, 3);
+    assert_eq!(CacheHitStat::MemoryHitRate as u8, 4);
+    assert_eq!(CacheHitStat::SsdHitRate as u8, 5);
+    assert_eq!(CacheHitStat::OverallHitRate as u8, 6);
+    assert_eq!(CacheHitStat::ValidGetRate as u8, 7);
+    assert_eq!(
+        CacheHitStat::MEMORY_CURRENT_CACHED_OBJECTS,
+        CacheHitStat::MemoryTotal
+    );
+    assert_eq!(
+        CacheHitStat::SSD_CURRENT_CACHED_OBJECTS,
+        CacheHitStat::SsdTotal
+    );
+    assert_eq!(
+        CacheHitStat::MEMORY_HITS_PER_CURRENT_CACHED_OBJECT,
+        CacheHitStat::MemoryHitRate
+    );
+    assert_eq!(
+        CacheHitStat::SSD_HITS_PER_CURRENT_CACHED_OBJECT,
+        CacheHitStat::SsdHitRate
+    );
+    assert_eq!(
+        CacheHitStat::OVERALL_HITS_PER_CURRENT_CACHED_OBJECT,
+        CacheHitStat::OverallHitRate
+    );
+
+    fn assert_aliases_and_formulas(stats: &metrics::CacheStats) {
+        use metrics::CacheHitStat;
+        let ratio = |hits: f64, total: f64| {
+            if total > 0.0 {
+                (hits / total * 100.0).round() / 100.0
+            } else {
+                0.0
+            }
+        };
+        assert_eq!(
+            stats[CacheHitStat::MEMORY_CURRENT_CACHED_OBJECTS],
+            stats[CacheHitStat::MemoryTotal]
+        );
+        assert_eq!(
+            stats[CacheHitStat::SSD_CURRENT_CACHED_OBJECTS],
+            stats[CacheHitStat::SsdTotal]
+        );
+        assert_eq!(
+            stats[CacheHitStat::MEMORY_HITS_PER_CURRENT_CACHED_OBJECT],
+            stats[CacheHitStat::MemoryHitRate]
+        );
+        assert_eq!(
+            stats[CacheHitStat::SSD_HITS_PER_CURRENT_CACHED_OBJECT],
+            stats[CacheHitStat::SsdHitRate]
+        );
+        assert_eq!(
+            stats[CacheHitStat::OVERALL_HITS_PER_CURRENT_CACHED_OBJECT],
+            stats[CacheHitStat::OverallHitRate]
+        );
+        assert_eq!(
+            stats[CacheHitStat::MemoryHitRate],
+            ratio(
+                stats[CacheHitStat::MemoryHits],
+                stats[CacheHitStat::MemoryTotal]
+            )
+        );
+        assert_eq!(
+            stats[CacheHitStat::SsdHitRate],
+            ratio(stats[CacheHitStat::SsdHits], stats[CacheHitStat::SsdTotal])
+        );
+        assert_eq!(
+            stats[CacheHitStat::OverallHitRate],
+            ratio(
+                stats[CacheHitStat::MemoryHits] + stats[CacheHitStat::SsdHits],
+                stats[CacheHitStat::MemoryTotal] + stats[CacheHitStat::SsdTotal]
+            )
+        );
+    }
+
+    let baseline = metrics::calculate_cache_stats();
+    assert_aliases_and_formulas(&baseline);
+    let service = MasterServiceImpl::default();
+    let client_id = Uuid::new_v4();
+    let segment_name = "cache-stats:1";
+    let segment_id = MasterService::mount_segment(
+        &service,
+        Request::new(proto::MountSegmentRequest {
+            client_id: Some(proto_uuid(client_id)),
+            segment_name: segment_name.into(),
+            size: 16 * 1024 * 1024,
+            base_addr: 0x3_0000_0000,
+            te_endpoint: String::new(),
+            protocol: String::new(),
+            host_id: String::new(),
+        }),
+    )
+    .await
+    .unwrap()
+    .into_inner()
+    .segment_id
+    .unwrap();
+    let key = "cache-stats-key";
+    MasterService::put_start(
+        &service,
+        Request::new(proto::PutStartRequest {
+            client_id: Some(proto_uuid(client_id)),
+            key: key.into(),
+            slice_length: 1024,
+            tenant_id: String::new(),
+            config: Some(replicate_config(segment_name)),
+        }),
+    )
+    .await
+    .unwrap();
+    MasterService::put_end(
+        &service,
+        Request::new(proto::PutEndRequest {
+            client_id: Some(proto_uuid(client_id)),
+            key: key.into(),
+            replica_type: proto::replica_descriptor::ReplicaType::Memory as i32,
+            tenant_id: String::new(),
+        }),
+    )
+    .await
+    .unwrap();
+
+    let after_put = metrics::calculate_cache_stats();
+    assert_aliases_and_formulas(&after_put);
+    assert_eq!(
+        after_put[CacheHitStat::MemoryHits],
+        baseline[CacheHitStat::MemoryHits]
+    );
+    assert_eq!(
+        after_put[CacheHitStat::MemoryTotal],
+        baseline[CacheHitStat::MemoryTotal] + 1.0
+    );
+    let extra_gets = ((after_put[CacheHitStat::MemoryTotal] - after_put[CacheHitStat::MemoryHits])
+        .max(0.0) as usize)
+        + 1;
+    for _ in 0..extra_gets {
+        MasterService::get_replica_list(
+            &service,
+            Request::new(proto::GetReplicaListRequest {
+                key: key.into(),
+                tenant_id: String::new(),
+            }),
+        )
+        .await
+        .unwrap();
+    }
+    let after_gets = metrics::calculate_cache_stats();
+    assert_aliases_and_formulas(&after_gets);
+    assert_eq!(
+        after_gets[CacheHitStat::MemoryHits],
+        baseline[CacheHitStat::MemoryHits] + extra_gets as f64
+    );
+    assert_eq!(
+        after_gets[CacheHitStat::MemoryTotal],
+        baseline[CacheHitStat::MemoryTotal] + 1.0
+    );
+    assert!(after_gets[CacheHitStat::ValidGetRate] >= baseline[CacheHitStat::ValidGetRate]);
+    assert!(after_gets[CacheHitStat::ValidGetRate] <= 1.0);
+    assert!(after_gets[CacheHitStat::MemoryHitRate] > 1.0);
+
+    let total_gets_before_failures = metrics::TOTAL_GETS.get();
+    let valid_gets_before_failures = metrics::VALID_GETS.get();
+    let not_ready_key = "cache-stats-not-ready";
+    MasterService::put_start(
+        &service,
+        Request::new(proto::PutStartRequest {
+            client_id: Some(proto_uuid(client_id)),
+            key: not_ready_key.into(),
+            slice_length: 1024,
+            tenant_id: String::new(),
+            config: Some(replicate_config(segment_name)),
+        }),
+    )
+    .await
+    .unwrap();
+    assert!(
+        MasterService::get_replica_list(
+            &service,
+            Request::new(proto::GetReplicaListRequest {
+                key: not_ready_key.into(),
+                tenant_id: String::new(),
+            }),
+        )
+        .await
+        .is_err()
+    );
+    assert!(
+        MasterService::get_replica_list(
+            &service,
+            Request::new(proto::GetReplicaListRequest {
+                key: "cache-stats-missing".into(),
+                tenant_id: String::new(),
+            }),
+        )
+        .await
+        .is_err()
+    );
+    let batch = MasterService::batch_get_replica_list(
+        &service,
+        Request::new(proto::BatchGetReplicaListRequest {
+            keys: vec![key.into(), "cache-stats-batch-missing".into()],
+            tenant_id: String::new(),
+        }),
+    )
+    .await
+    .unwrap()
+    .into_inner();
+    assert_eq!(batch.results.len(), 2);
+    assert_eq!(metrics::TOTAL_GETS.get(), total_gets_before_failures + 4);
+    assert_eq!(metrics::VALID_GETS.get(), valid_gets_before_failures + 1);
+    let total_before_exist = metrics::TOTAL_GETS.get();
+    MasterService::exist_key(
+        &service,
+        Request::new(proto::ExistKeyRequest {
+            key: key.into(),
+            tenant_id: String::new(),
+        }),
+    )
+    .await
+    .unwrap();
+    assert_eq!(metrics::TOTAL_GETS.get(), total_before_exist);
+
+    let rpc =
+        MasterService::calc_cache_stats(&service, Request::new(proto::CalcCacheStatsRequest {}))
+            .await
+            .unwrap()
+            .into_inner()
+            .stats;
+    let calculated = metrics::calculate_cache_stats();
+    let expected_valid_get_rate = {
+        let valid = metrics::VALID_GETS.get() as f64;
+        let total = metrics::TOTAL_GETS.get() as f64;
+        if total > 0.0 {
+            (valid / total * 100.0).round() / 100.0
+        } else {
+            0.0
+        }
+    };
+    assert_eq!(
+        calculated[CacheHitStat::ValidGetRate],
+        expected_valid_get_rate
+    );
+    assert_eq!(rpc["memory_hits"], calculated[CacheHitStat::MemoryHits]);
+    assert_eq!(rpc["ssd_hits"], calculated[CacheHitStat::SsdHits]);
+    assert_eq!(rpc["memory_total"], calculated[CacheHitStat::MemoryTotal]);
+    assert_eq!(rpc["ssd_total"], calculated[CacheHitStat::SsdTotal]);
+    assert_eq!(
+        rpc["memory_hit_rate"],
+        calculated[CacheHitStat::MemoryHitRate]
+    );
+    assert_eq!(rpc["ssd_hit_rate"], calculated[CacheHitStat::SsdHitRate]);
+    assert_eq!(
+        rpc["overall_hit_rate"],
+        calculated[CacheHitStat::OverallHitRate]
+    );
+    assert_eq!(
+        rpc["valid_get_rate"],
+        calculated[CacheHitStat::ValidGetRate]
+    );
+
+    MasterService::unmount_segment(
+        &service,
+        Request::new(proto::UnmountSegmentRequest {
+            segment_id: Some(segment_id),
+            client_id: Some(proto_uuid(client_id)),
+        }),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        metrics::calculate_cache_stats()[CacheHitStat::MemoryTotal],
+        baseline[CacheHitStat::MemoryTotal]
+    );
+}
+
+#[tokio::test]
 async fn test_cache_total_metrics_track_object_inventory() {
     let _guard = METRICS_TEST_LOCK.lock().unwrap();
     let service = MasterServiceImpl::with_runtime_config(MasterRuntimeConfig {

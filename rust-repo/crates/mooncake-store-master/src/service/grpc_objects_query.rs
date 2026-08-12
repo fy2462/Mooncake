@@ -29,6 +29,7 @@ impl MasterServiceImpl {
         tenant_id: &TenantId,
         key: &str,
     ) -> Result<proto::GetReplicaListResponse, Status> {
+        metrics::TOTAL_GETS.inc();
         let scoped_key = tenant_id.make_scoped_key(key);
         let Some(entry) = self.object_snapshot_and_grant_lease(&scoped_key, true)? else {
             return if self.state.objects.contains_key(&scoped_key) {
