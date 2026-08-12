@@ -29739,13 +29739,18 @@
     "file": "ha/standby/hot_standby_service_test.cpp",
     "test": "HotStandbyServiceTest.TestExportMetadataSnapshot"
    },
-   "reason": "Production prerequisite: add a point-in-time read-only metadata export on HotStandbyService that clones the standby MasterState under the same snapshot consistency guard used by recovery. Add cpp_parity_fresh_standby_metadata_export_succeeds_empty to src/hot_standby.rs; export before start, assert Ok and exactly zero entries, and do not claim persistence or serving. Snapshot-provider load tests exercise the opposite direction and are not coverage.",
+   "reason": "Rust exposes a point-in-time HotStandbyService metadata export that clones the production object table while holding the same global snapshot barrier used by state recovery and returns deterministic key order. The mapped test calls this service boundary before start and obtains exactly zero entries. This row does not claim the separate non-empty per-object sequence provenance oracle.",
    "review": {
-    "oracle": "mooncake-store/tests/ha/standby/hot_standby_service_test.cpp:402-406 and HotStandbyService::ExportMetadataSnapshot",
+    "oracle": "mooncake-store/tests/ha/standby/hot_standby_service_test.cpp:402-406 and HotStandbyService::ExportMetadataSnapshot; Rust hot_standby.rs cpp_parity_ha_standby_hot_standby_service_test_cpp_hotstandbyservicetest_testexportmetadatasnapshot",
     "reviewed": true
    },
-   "rust": [],
-   "status": "missing"
+   "rust": [
+    {
+     "file": "mooncake-store-master/src/hot_standby.rs",
+     "test": "cpp_parity_ha_standby_hot_standby_service_test_cpp_hotstandbyservicetest_testexportmetadatasnapshot"
+    }
+   ],
+   "status": "covered"
   },
   {
    "behavior": "A fresh standby's latest applied sequence accessor returns zero.",

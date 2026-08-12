@@ -34,7 +34,7 @@ use crate::ha::{
     HaError, SnapshotProvider, StandbyEvent, StandbyState, StandbyStateMachine, StandbySyncStatus,
 };
 use crate::oplog::{OpLogChangeNotifier, OpLogStore};
-use crate::service::state::MasterState;
+use crate::service::state::{MasterState, ObjectEntry};
 use crate::service::{abort_orphaned_drain_segments_after_recovery, restore_loaded_snapshot_state};
 use std::sync::Arc;
 use tokio::sync::watch;
@@ -1847,6 +1847,16 @@ mod tests {
         assert_eq!(service.metadata_count(), 0);
     }
 
+    #[test]
+    fn cpp_parity_ha_standby_hot_standby_service_test_cpp_hotstandbyservicetest_testexportmetadatasnapshot()
+     {
+        let service =
+            HotStandbyService::new(Arc::new(MasterState::empty()), HotStandbyConfig::default());
+
+        let snapshot = service.export_metadata_snapshot();
+        assert!(snapshot.is_empty());
+    }
+
     #[tokio::test]
     async fn test_snapshot_only_bootstrap_uses_empty_baseline_when_snapshot_missing() {
         let state = Arc::new(MasterState::empty());
@@ -2989,6 +2999,19 @@ impl HotStandbyService {
     /// Return the number of object metadata entries currently held by the standby.
     pub fn metadata_count(&self) -> usize {
         self.state.objects.len()
+    }
+
+    /// Clone a point-in-time view of the standby's object metadata.
+    pub fn export_metadata_snapshot(&self) -> Vec<(String, ObjectEntry)> {
+        let _snapshot_guard = self.state.key_mutations.lock_snapshot();
+        let mut snapshot = self
+            .state
+            .objects
+            .iter()
+            .map(|entry| (entry.key().clone(), entry.value().clone()))
+            .collect::<Vec<_>>();
+        snapshot.sort_by(|left, right| left.0.cmp(&right.0));
+        snapshot
     }
 
     pub fn is_running(&self) -> bool {
