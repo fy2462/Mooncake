@@ -17312,13 +17312,18 @@
     "file": "storage_backend_test.cpp",
     "test": "StorageBackendTest.AdaptorBatchOffload_PartialSuccess"
    },
-   "reason": "Rust has sequential per-task local offload and can report successful and failed task metadata in one master notification, but no deterministic FilePerKey fault seam proves the C++ exact prefix/subset and success-count contract. Add cpp_parity_file_per_key_batch_partial_success_exact_subset: inject one selected local commit failure into a stable ordered three-key workload, assert the returned successful count and exact durable subset, prove the failed key absent, and verify every surviving byte. If Rust task ordering is intentionally unspecified, first define the equivalent result as the reported-success set rather than copying C++ unordered-map iteration order.",
+   "reason": "Rust LocalStorageBackend::write_batch_best_effort is the ordered best-effort FilePerKey batch boundary: every item executes the existing production write_object reservation, eviction, and atomic-write path, preserves its independent result, and a failure does not prevent later items. local_storage_backend::tests::cpp_parity_file_per_key_batch_partial_success_exact_subset supplies ordered key1/key2/key3 with the exact 1,024-byte a/b/c payloads and 50-KiB quota, makes only key2's canonical atomic target a directory, and proves three ordered results with exactly two successes. The authoritative scan contains exactly key1/key3, key2 exists=false, and both surviving values are byte-exact.",
    "review": {
     "oracle": "mooncake-store/tests/storage_backend_test.cpp:711-730, TestPartialSuccessBehavior, and Rust mooncake-store-client/src/client/storage_local.rs:423-585",
     "reviewed": true
    },
-   "rust": [],
-   "status": "missing"
+   "rust": [
+    {
+     "file": "mooncake-store-client/src/local_storage_backend/mod.rs",
+     "test": "cpp_parity_file_per_key_batch_partial_success_exact_subset"
+    }
+   ],
+   "status": "covered"
   },
   {
    "behavior": "Empty batch is INVALID_KEY.",

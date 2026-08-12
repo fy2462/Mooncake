@@ -1191,6 +1191,19 @@ impl LocalStorageBackend {
         Ok(evicted)
     }
 
+    /// Write an ordered batch while preserving each item's independent result.
+    /// One failed item does not prevent later items from reaching the ordinary
+    /// FilePerKey reservation, eviction, and atomic-write path.
+    pub fn write_batch_best_effort<'a>(
+        &self,
+        items: impl IntoIterator<Item = (&'a str, &'a [u8])>,
+    ) -> Vec<(String, StoreResult<Vec<String>>)> {
+        items
+            .into_iter()
+            .map(|(key, data)| (key.to_string(), self.write_object(key, data)))
+            .collect()
+    }
+
     pub(crate) fn prepare_write(
         &self,
         key: &str,
@@ -3113,6 +3126,49 @@ mod tests {
 
         backend.write_object("tenant/key", b"two-bytes").unwrap();
         assert_eq!(backend.read_object("tenant/key").unwrap(), b"two-bytes");
+    }
+
+    #[test]
+    fn cpp_parity_file_per_key_batch_partial_success_exact_subset() {
+        let (backend, _tmp) = backend_with_available_space_sequence(50 * 1024, vec![u64::MAX]);
+        let fixtures = [
+            ("key1", vec![b'a'; 1024]),
+            ("key2", vec![b'b'; 1024]),
+            ("key3", vec![b'c'; 1024]),
+        ];
+        let blocked_target = backend.key_path("key2");
+        std::fs::create_dir_all(&blocked_target).unwrap();
+
+        let results = backend
+            .write_batch_best_effort(fixtures.iter().map(|(key, value)| (*key, value.as_slice())));
+
+        assert_eq!(results.len(), 3);
+        assert_eq!(
+            results
+                .iter()
+                .map(|(key, _)| key.as_str())
+                .collect::<Vec<_>>(),
+            ["key1", "key2", "key3"]
+        );
+        assert_eq!(
+            results.iter().filter(|(_, result)| result.is_ok()).count(),
+            2
+        );
+        assert!(results[0].1.is_ok());
+        assert!(results[1].1.is_err());
+        assert!(results[2].1.is_ok());
+        assert_eq!(backend.read_object("key1").unwrap(), fixtures[0].1);
+        assert!(!backend.exists("key2"));
+        assert_eq!(backend.read_object("key3").unwrap(), fixtures[2].1);
+        let records = backend.scan_records().unwrap();
+        assert_eq!(records.len(), 2);
+        assert_eq!(
+            records
+                .iter()
+                .map(|record| record.storage_key.as_str())
+                .collect::<HashSet<_>>(),
+            HashSet::from(["key1", "key3"])
+        );
     }
 
     #[test]
