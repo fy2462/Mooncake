@@ -41,6 +41,7 @@ pub mod main_config;
 pub mod metrics;
 pub mod oplog;
 pub mod service;
+pub mod snapshot_scheduler;
 pub mod storage_backend;
 pub mod storage_distributed;
 pub mod tenant_id;

@@ -60,18 +60,17 @@ pub(super) async fn run_standalone(
         let retention_count = args.snapshot_retention_count as usize;
         tokio::spawn(async move {
             loop {
-                tokio::select! {
-                    _ = tokio::time::sleep(tokio::time::Duration::from_secs(interval)) => {
-                        svc.save_snapshot();
-                        if let Some(ref publisher) = catalog_publisher {
-                            publish_catalog_snapshot(&svc, publisher, 0, retention_count);
-                        }
-                    }
-                    changed = snapshot_shutdown_rx.changed() => {
-                        if changed.is_err() || *snapshot_shutdown_rx.borrow() {
-                            break;
-                        }
-                    }
+                if !mooncake_store_master::snapshot_scheduler::wait_for_interval_or_shutdown(
+                    interval,
+                    &mut snapshot_shutdown_rx,
+                )
+                .await
+                {
+                    break;
+                }
+                svc.save_snapshot();
+                if let Some(ref publisher) = catalog_publisher {
+                    publish_catalog_snapshot(&svc, publisher, 0, retention_count);
                 }
             }
         });
@@ -154,25 +153,28 @@ pub(super) async fn run_leader_server(
         let retention_count = args.snapshot_retention_count as usize;
         background_tasks.push(tokio::spawn(async move {
             loop {
-                tokio::select! {
-                    biased;
-                    changed = snapshot_shutdown_rx.changed() => {
-                        if changed.is_err() || *snapshot_shutdown_rx.borrow() {
-                            break;
-                        }
-                    }
-                    _ = tokio::time::sleep(tokio::time::Duration::from_secs(interval)) => {
-                        if !svc.is_service_available() {
-                            tracing::debug!(
-                                "Skipping scheduled HA snapshot because this master is not serving"
-                            );
-                            continue;
-                        }
-                        svc.save_snapshot();
-                        if let Some(ref publisher) = catalog_publisher {
-                            publish_catalog_snapshot(&svc, publisher, producer_view_version, retention_count);
-                        }
-                    }
+                if !mooncake_store_master::snapshot_scheduler::wait_for_interval_or_shutdown(
+                    interval,
+                    &mut snapshot_shutdown_rx,
+                )
+                .await
+                {
+                    break;
+                }
+                if !svc.is_service_available() {
+                    tracing::debug!(
+                        "Skipping scheduled HA snapshot because this master is not serving"
+                    );
+                    continue;
+                }
+                svc.save_snapshot();
+                if let Some(ref publisher) = catalog_publisher {
+                    publish_catalog_snapshot(
+                        &svc,
+                        publisher,
+                        producer_view_version,
+                        retention_count,
+                    );
                 }
             }
         }));

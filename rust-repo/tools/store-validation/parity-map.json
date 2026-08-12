@@ -14786,13 +14786,18 @@
     "file": "ha/snapshot/snapshot_child_process_test.cpp",
     "test": "SnapshotChildProcessTest.DestructorInterruptsSnapshotThreadSleep"
    },
-   "reason": "Rust has a scheduler shutdown-select path, but no discoverable test measures bounded shutdown while a scheduled snapshot wait is pending.",
+   "reason": "The production standalone and HA snapshot schedulers share the tested interruptible interval primitive. The executable test enters a 30-second interval wait, signals shutdown, and requires the scheduler to return its no-snapshot outcome in under the C++ five-second bound.",
    "review": {
     "oracle": "snapshot_child_process_test.cpp DestructorInterruptsSnapshotThreadSleep and master_snapshot_manager.cpp Stop/SnapshotThreadFunc; Rust main_server.rs scheduler shutdown path",
     "reviewed": true
    },
-   "rust": [],
-   "status": "missing"
+   "rust": [
+    {
+     "file": "mooncake-store-master/tests/test_snapshot_scheduler.rs",
+     "test": "cpp_parity_snapshot_scheduler_shutdown_interrupts_interval_wait"
+    }
+   ],
+   "status": "covered"
   },
   {
    "behavior": "An enabled periodic snapshot service writes a latest.txt marker within five seconds.",
