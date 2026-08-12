@@ -277,6 +277,7 @@ fn test_object_entry_creation() {
         pending_replaced_quota_charge_bytes: 0,
         memory_cache_total_accounted: false,
         disk_cache_total_accounted: false,
+        disk_allocated_bytes_accounted: 0,
     };
     assert_eq!(entry.replicas.len(), 2);
     assert_eq!(entry.replicas[0].segment_name, "s1");

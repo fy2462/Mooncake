@@ -33780,13 +33780,18 @@
     "file": "master_metrics_test.cpp",
     "test": "MasterMetricsTest.LocalDiskReplicaAllocatedSize"
    },
-   "reason": "Production prerequisite: ensure the allocated-file gauge follows LocalDisk replica creation/removal and provide C++-compatible direct NotifyOffloadSuccess fixture admission; if direct unsolicited offload remains invalid, explicitly add the smallest production-compatible admitted-task bridge rather than treating heartbeat-only fixtures as equivalent. Add cpp_parity_local_disk_replica_allocated_file_size to mooncake-store-master/tests/test_master_metrics.rs; lock metrics, mount the exact 64-MiB Memory segment and LocalDisk, record ALLOCATED_FILE_SIZE, create/offload one 4,096-byte object through that compatibility path, assert baseline+4,096, make Remove deterministically eligible by injected/advanced lease expiry (or force only if it preserves the C++ observable successful-Remove result), then assert successful Remove and baseline restoration.",
+   "reason": "Rust test_master_metrics.rs:cpp_parity_master_metrics_test_cpp_mastermetricstest_localdiskreplicaallocatedsize runs in an exact fresh child process, mounts the C++ 64-MiB Memory fixture, completes one 4,096-byte object, and reports its LocalDisk copy through the production classic unsolicited NotifyOffloadSuccess compatibility path. It proves the production allocated-file gauge rises from exact zero to 4,096, then a non-forced production Remove succeeds, the key is absent, and the gauge returns exactly to zero. The shared ObjectEntry runtime ledger accounts every Disk/LocalDisk descriptor by size across creation, replacement, restore/replay, revoke, eviction, and removal without persisting process-local gauge state.",
    "review": {
     "oracle": "mooncake-store/tests/master_metrics_test.cpp:630-662, PutKeyAndOffload, and mooncake-store/src/master_service.cpp NotifyOffloadSuccess",
     "reviewed": true
    },
-   "rust": [],
-   "status": "missing"
+   "rust": [
+    {
+     "file": "mooncake-store-master/tests/test_master_metrics.rs",
+     "test": "cpp_parity_master_metrics_test_cpp_mastermetricstest_localdiskreplicaallocatedsize"
+    }
+   ],
+   "status": "covered"
   },
   {
    "behavior": "Successive LocalDisk capacity reports of 800 GiB, 400 GiB, and 400 GiB yield total file capacity baseline+800 GiB, then baseline+400 GiB, then unchanged baseline+400 GiB, proving replacement and idempotency rather than accumulation.",

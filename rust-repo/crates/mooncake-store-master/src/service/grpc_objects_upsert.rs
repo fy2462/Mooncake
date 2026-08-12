@@ -158,6 +158,7 @@ impl MasterServiceImpl {
                         true
                     }
                 });
+                sync_cache_total_accounting(&mut existing);
                 self.state.processing_keys.remove(&scoped_key);
 
                 let has_completed_write_target = existing.replicas.iter().any(|replica| {
@@ -406,29 +407,29 @@ impl MasterServiceImpl {
 
         let soft_pin_timeout = Self::reconcile_soft_pin(config.with_soft_pin, previous_soft_pin);
         let now = SystemTime::now();
-        let replaced = self.state.objects.insert(
-            scoped_key.to_string(),
-            ObjectEntry {
-                replicas: replicas.clone(),
-                size: slice_length,
-                last_access: now,
-                hard_pinned,
-                data_type: config.data_type,
-                client_id,
-                put_start_time: Some(now),
-                lease_timeout: None,
-                soft_pin_timeout,
-                tenant_id: tenant_id.clone(),
-                group_id,
-                quota_committed: false,
-                reserved_quota_charge_bytes: requested_quota_charge,
-                committed_quota_charge_bytes: 0,
-                pending_replaced_quota_charge_bytes,
-                memory_cache_total_accounted: false,
-                disk_cache_total_accounted: false,
-                user_key: user_key.to_string(),
-            },
-        );
+        let mut object = ObjectEntry {
+            replicas: replicas.clone(),
+            size: slice_length,
+            last_access: now,
+            hard_pinned,
+            data_type: config.data_type,
+            client_id,
+            put_start_time: Some(now),
+            lease_timeout: None,
+            soft_pin_timeout,
+            tenant_id: tenant_id.clone(),
+            group_id,
+            quota_committed: false,
+            reserved_quota_charge_bytes: requested_quota_charge,
+            committed_quota_charge_bytes: 0,
+            pending_replaced_quota_charge_bytes,
+            memory_cache_total_accounted: false,
+            disk_cache_total_accounted: false,
+            disk_allocated_bytes_accounted: 0,
+            user_key: user_key.to_string(),
+        };
+        sync_cache_total_accounting(&mut object);
+        let replaced = self.state.objects.insert(scoped_key.to_string(), object);
         if replacing_existing {
             let mut replaced = replaced.expect(
                 "size-changing Upsert holds the key mutation lock and replaces an existing object",

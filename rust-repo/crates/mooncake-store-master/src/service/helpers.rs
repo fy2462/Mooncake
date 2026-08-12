@@ -927,6 +927,20 @@ fn has_completed_disk_cache_replica(object: &ObjectEntry) -> bool {
     })
 }
 
+fn disk_allocated_bytes(object: &ObjectEntry) -> u64 {
+    object
+        .replicas
+        .iter()
+        .filter(|replica| {
+            matches!(
+                replica.replica_type,
+                ReplicaType::Disk | ReplicaType::LocalDisk
+            )
+        })
+        .fold(0_u64, |total, replica| total.saturating_add(replica.size))
+        .min(i64::MAX as u64)
+}
+
 pub(crate) fn sync_cache_total_accounting(object: &mut ObjectEntry) {
     let has_memory = has_completed_memory_cache_replica(object);
     if !object.memory_cache_total_accounted && has_memory {
@@ -945,6 +959,16 @@ pub(crate) fn sync_cache_total_accounting(object: &mut ObjectEntry) {
         metrics::FILE_CACHE_TOTAL.dec();
         object.disk_cache_total_accounted = false;
     }
+
+    let disk_bytes = disk_allocated_bytes(object);
+    if disk_bytes > object.disk_allocated_bytes_accounted {
+        metrics::ALLOCATED_FILE_SIZE
+            .add((disk_bytes - object.disk_allocated_bytes_accounted) as i64);
+    } else if disk_bytes < object.disk_allocated_bytes_accounted {
+        metrics::ALLOCATED_FILE_SIZE
+            .sub((object.disk_allocated_bytes_accounted - disk_bytes) as i64);
+    }
+    object.disk_allocated_bytes_accounted = disk_bytes;
 }
 
 pub(crate) fn account_cache_total_removal(object: &mut ObjectEntry) {
@@ -955,6 +979,11 @@ pub(crate) fn account_cache_total_removal(object: &mut ObjectEntry) {
     if object.disk_cache_total_accounted {
         metrics::FILE_CACHE_TOTAL.dec();
         object.disk_cache_total_accounted = false;
+    }
+    if object.disk_allocated_bytes_accounted != 0 {
+        metrics::ALLOCATED_FILE_SIZE
+            .sub(object.disk_allocated_bytes_accounted.min(i64::MAX as u64) as i64);
+        object.disk_allocated_bytes_accounted = 0;
     }
 }
 
@@ -1570,6 +1599,88 @@ mod tests {
     use super::*;
     use crate::service::MasterServiceImpl;
     use crate::service::state::LocalDiskSegmentEntry;
+    use std::sync::Mutex;
+
+    static FILE_BYTES_TEST_LOCK: Mutex<()> = Mutex::new(());
+
+    fn accounting_test_replica(replica_type: ReplicaType, size: u64) -> ReplicaDescriptor {
+        ReplicaDescriptor {
+            segment_id: Uuid::new_v4(),
+            segment_name: "accounting".into(),
+            offset: 0,
+            size,
+            status: ReplicaStatus::Allocating,
+            replica_type,
+            holder_client_id: None,
+            local_disk_storage_id: None,
+            local_disk_generation_id: None,
+            refcnt: 0,
+            handle_valid: true,
+            base_addr: 0,
+            protocol: String::new(),
+        }
+    }
+
+    fn accounting_test_object() -> ObjectEntry {
+        ObjectEntry {
+            replicas: vec![],
+            size: 0,
+            last_access: SystemTime::UNIX_EPOCH,
+            hard_pinned: false,
+            data_type: Default::default(),
+            client_id: Uuid::nil(),
+            put_start_time: None,
+            lease_timeout: None,
+            soft_pin_timeout: None,
+            tenant_id: TenantId::default(),
+            group_id: String::new(),
+            quota_committed: false,
+            reserved_quota_charge_bytes: 0,
+            committed_quota_charge_bytes: 0,
+            pending_replaced_quota_charge_bytes: 0,
+            memory_cache_total_accounted: false,
+            disk_cache_total_accounted: false,
+            disk_allocated_bytes_accounted: 0,
+            user_key: "accounting".into(),
+        }
+    }
+
+    #[test]
+    fn disk_allocated_bytes_tracks_descriptor_lifetime_idempotently() {
+        let _guard = FILE_BYTES_TEST_LOCK.lock().unwrap();
+        let baseline = metrics::ALLOCATED_FILE_SIZE.get();
+        let mut object = accounting_test_object();
+        object.replicas = vec![
+            accounting_test_replica(ReplicaType::Memory, 11),
+            accounting_test_replica(ReplicaType::NoFSsd, 13),
+            accounting_test_replica(ReplicaType::Disk, 17),
+            accounting_test_replica(ReplicaType::LocalDisk, 19),
+        ];
+
+        sync_cache_total_accounting(&mut object);
+        assert_eq!(metrics::ALLOCATED_FILE_SIZE.get(), baseline + 36);
+        assert_eq!(object.disk_allocated_bytes_accounted, 36);
+        sync_cache_total_accounting(&mut object);
+        assert_eq!(metrics::ALLOCATED_FILE_SIZE.get(), baseline + 36);
+
+        object
+            .replicas
+            .retain(|replica| replica.replica_type != ReplicaType::Disk);
+        object
+            .replicas
+            .iter_mut()
+            .find(|replica| replica.replica_type == ReplicaType::LocalDisk)
+            .unwrap()
+            .size = 23;
+        sync_cache_total_accounting(&mut object);
+        assert_eq!(metrics::ALLOCATED_FILE_SIZE.get(), baseline + 23);
+        assert_eq!(object.disk_allocated_bytes_accounted, 23);
+
+        account_cache_total_removal(&mut object);
+        assert_eq!(metrics::ALLOCATED_FILE_SIZE.get(), baseline);
+        account_cache_total_removal(&mut object);
+        assert_eq!(metrics::ALLOCATED_FILE_SIZE.get(), baseline);
+    }
 
     #[test]
     fn mutation_projection_preserves_runtime_replica_refcounts() {
@@ -1606,6 +1717,7 @@ mod tests {
             pending_replaced_quota_charge_bytes: 0,
             memory_cache_total_accounted: false,
             disk_cache_total_accounted: false,
+            disk_allocated_bytes_accounted: 0,
             user_key: "key".into(),
         };
 
@@ -1663,6 +1775,7 @@ mod tests {
             pending_replaced_quota_charge_bytes: 0,
             memory_cache_total_accounted: false,
             disk_cache_total_accounted: false,
+            disk_allocated_bytes_accounted: 0,
             user_key: "key".into(),
         };
 
@@ -1716,6 +1829,7 @@ mod tests {
             pending_replaced_quota_charge_bytes: 0,
             memory_cache_total_accounted: false,
             disk_cache_total_accounted: false,
+            disk_allocated_bytes_accounted: 0,
             user_key: "key".to_string(),
         };
 
@@ -1751,6 +1865,7 @@ mod tests {
             pending_replaced_quota_charge_bytes: 0,
             memory_cache_total_accounted: false,
             disk_cache_total_accounted: false,
+            disk_allocated_bytes_accounted: 0,
             user_key: "key".into(),
         };
 
@@ -1800,6 +1915,7 @@ mod tests {
             pending_replaced_quota_charge_bytes: 0,
             memory_cache_total_accounted: false,
             disk_cache_total_accounted: false,
+            disk_allocated_bytes_accounted: 0,
             user_key: "key".into(),
         };
 
@@ -1877,6 +1993,7 @@ mod tests {
             pending_replaced_quota_charge_bytes: 100,
             memory_cache_total_accounted: false,
             disk_cache_total_accounted: false,
+            disk_allocated_bytes_accounted: 0,
             user_key: "key".into(),
         };
         account_removed_object_quota(&revoked_service.state, &replacement).unwrap();
@@ -1921,6 +2038,7 @@ mod tests {
             pending_replaced_quota_charge_bytes: 0,
             memory_cache_total_accounted: false,
             disk_cache_total_accounted: false,
+            disk_allocated_bytes_accounted: 0,
             user_key: "key".into(),
         };
 
@@ -1966,6 +2084,7 @@ mod tests {
             pending_replaced_quota_charge_bytes: 0,
             memory_cache_total_accounted: false,
             disk_cache_total_accounted: false,
+            disk_allocated_bytes_accounted: 0,
             user_key: "key".into(),
         };
 
@@ -2022,6 +2141,7 @@ mod tests {
                 pending_replaced_quota_charge_bytes: 0,
                 memory_cache_total_accounted: false,
                 disk_cache_total_accounted: false,
+                disk_allocated_bytes_accounted: 0,
                 user_key: "partial-stale".into(),
             },
         );

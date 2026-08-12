@@ -1500,6 +1500,7 @@ mod tests {
             pending_replaced_quota_charge_bytes: 0,
             memory_cache_total_accounted: false,
             disk_cache_total_accounted: false,
+            disk_allocated_bytes_accounted: 0,
             user_key: "key".into(),
         };
 

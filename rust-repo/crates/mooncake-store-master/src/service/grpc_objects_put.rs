@@ -249,34 +249,34 @@ impl MasterServiceImpl {
             .collect();
 
         let now = SystemTime::now();
-        self.state.objects.insert(
-            scoped_key.clone(),
-            ObjectEntry {
-                replicas,
-                size: req.slice_length,
-                last_access: now,
-                hard_pinned: config.with_hard_pin,
-                data_type: config.data_type,
-                client_id,
-                put_start_time: Some(now),
-                lease_timeout: None,
-                soft_pin_timeout: if config.with_soft_pin {
-                    crate::metrics::SOFT_PIN_KEY_COUNT.inc();
-                    Some(SystemTime::UNIX_EPOCH)
-                } else {
-                    None
-                },
-                tenant_id: tenant_id.clone(),
-                group_id,
-                quota_committed: false,
-                reserved_quota_charge_bytes: reserved_quota_charge,
-                committed_quota_charge_bytes: 0,
-                pending_replaced_quota_charge_bytes: 0,
-                memory_cache_total_accounted: false,
-                disk_cache_total_accounted: false,
-                user_key,
+        let mut object = ObjectEntry {
+            replicas,
+            size: req.slice_length,
+            last_access: now,
+            hard_pinned: config.with_hard_pin,
+            data_type: config.data_type,
+            client_id,
+            put_start_time: Some(now),
+            lease_timeout: None,
+            soft_pin_timeout: if config.with_soft_pin {
+                crate::metrics::SOFT_PIN_KEY_COUNT.inc();
+                Some(SystemTime::UNIX_EPOCH)
+            } else {
+                None
             },
-        );
+            tenant_id: tenant_id.clone(),
+            group_id,
+            quota_committed: false,
+            reserved_quota_charge_bytes: reserved_quota_charge,
+            committed_quota_charge_bytes: 0,
+            pending_replaced_quota_charge_bytes: 0,
+            memory_cache_total_accounted: false,
+            disk_cache_total_accounted: false,
+            disk_allocated_bytes_accounted: 0,
+            user_key,
+        };
+        sync_cache_total_accounting(&mut object);
+        self.state.objects.insert(scoped_key.clone(), object);
         self.register_tenant_metadata_object(&tenant_id);
         // 将 key 加入 processing_keys，防止并发 PutStart 冲突
         // Add key to processing_keys to prevent concurrent PutStart conflicts

@@ -333,6 +333,132 @@ fn cpp_parity_master_metrics_test_cpp_mastermetricstest_batchrequesttest() {
     });
 }
 
+#[test]
+fn cpp_parity_master_metrics_test_cpp_mastermetricstest_localdiskreplicaallocatedsize() {
+    const CHILD_MARKER: &str = "MOONCAKE_ALLOCATED_FILE_SIZE_METRICS_CHILD";
+    const TEST_NAME: &str =
+        "cpp_parity_master_metrics_test_cpp_mastermetricstest_localdiskreplicaallocatedsize";
+    if std::env::var_os(CHILD_MARKER).is_none() {
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .arg(TEST_NAME)
+            .arg("--exact")
+            .arg("--test-threads=1")
+            .env(CHILD_MARKER, "1")
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "fresh allocated-file metrics child failed\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        return;
+    }
+
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    runtime.block_on(async {
+        const KEY: &str = "ssd_alloc_test_key";
+        const SIZE: u64 = 4096;
+        let service = MasterServiceImpl::default();
+        let client_id = Uuid::new_v4();
+        let segment = "ssd_alloc_test_segment";
+        assert_eq!(metrics::master_metric_snapshot().allocated_file_size, 0);
+
+        MasterService::mount_segment(
+            &service,
+            Request::new(proto::MountSegmentRequest {
+                client_id: Some(proto_uuid(client_id)),
+                segment_name: segment.into(),
+                size: 64 * 1024 * 1024,
+                base_addr: 0x4_0000_0000,
+                te_endpoint: segment.into(),
+                protocol: String::new(),
+                host_id: String::new(),
+            }),
+        )
+        .await
+        .unwrap();
+        MasterService::put_start(
+            &service,
+            Request::new(proto::PutStartRequest {
+                client_id: Some(proto_uuid(client_id)),
+                key: KEY.into(),
+                slice_length: SIZE,
+                tenant_id: String::new(),
+                config: Some(replicate_config(segment)),
+            }),
+        )
+        .await
+        .unwrap();
+        MasterService::put_end(
+            &service,
+            Request::new(proto::PutEndRequest {
+                client_id: Some(proto_uuid(client_id)),
+                key: KEY.into(),
+                replica_type: proto::replica_descriptor::ReplicaType::Memory as i32,
+                tenant_id: String::new(),
+            }),
+        )
+        .await
+        .unwrap();
+
+        MasterService::notify_offload_success(
+            &service,
+            Request::new(proto::NotifyOffloadSuccessRequest {
+                client_id: Some(proto_uuid(client_id)),
+                keys: vec![KEY.into()],
+                metadatas: vec![proto::StorageObjectMetadata {
+                    bucket_id: 0,
+                    offset: 0,
+                    key_size: KEY.len() as i64,
+                    data_size: SIZE as i64,
+                    transport_endpoint: "ssd_alloc_test_endpoint".into(),
+                }],
+                tasks: vec![proto::OffloadTaskItem {
+                    tenant_id: String::new(),
+                    key: KEY.into(),
+                    size: SIZE as i64,
+                    generation_id: None,
+                }],
+                recovery_session_id: None,
+            }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            metrics::master_metric_snapshot().allocated_file_size,
+            SIZE as i64
+        );
+
+        MasterService::remove(
+            &service,
+            Request::new(proto::RemoveRequest {
+                key: KEY.into(),
+                force: false,
+                tenant_id: String::new(),
+            }),
+        )
+        .await
+        .unwrap();
+        let exists = MasterService::exist_key(
+            &service,
+            Request::new(proto::ExistKeyRequest {
+                key: KEY.into(),
+                tenant_id: String::new(),
+            }),
+        )
+        .await
+        .unwrap()
+        .into_inner()
+        .exists;
+        assert!(!exists);
+        assert_eq!(metrics::master_metric_snapshot().allocated_file_size, 0);
+    });
+}
+
 async fn put_complete(service: &MasterServiceImpl, client_id: Uuid, key: &str, segment: &str) {
     MasterService::put_start(
         service,

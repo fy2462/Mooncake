@@ -207,34 +207,34 @@ impl MasterServiceImpl {
                         .map(|r| r.segment_id),
                 );
                 let now = SystemTime::now();
-                self.state.objects.insert(
-                    key.clone(),
-                    ObjectEntry {
-                        replicas,
-                        size: slice_len,
-                        last_access: now,
-                        hard_pinned: config.with_hard_pin,
-                        data_type: config.data_type,
-                        client_id,
-                        put_start_time: Some(now),
-                        lease_timeout: None,
-                        soft_pin_timeout: if config.with_soft_pin {
-                            crate::metrics::SOFT_PIN_KEY_COUNT.inc();
-                            Some(SystemTime::UNIX_EPOCH)
-                        } else {
-                            None
-                        },
-                        tenant_id: tenant_id.clone(),
-                        group_id,
-                        quota_committed: false,
-                        reserved_quota_charge_bytes: requested_quota_charge,
-                        committed_quota_charge_bytes: 0,
-                        pending_replaced_quota_charge_bytes: 0,
-                        memory_cache_total_accounted: false,
-                        disk_cache_total_accounted: false,
-                        user_key: raw_key.clone(),
+                let mut object = ObjectEntry {
+                    replicas,
+                    size: slice_len,
+                    last_access: now,
+                    hard_pinned: config.with_hard_pin,
+                    data_type: config.data_type,
+                    client_id,
+                    put_start_time: Some(now),
+                    lease_timeout: None,
+                    soft_pin_timeout: if config.with_soft_pin {
+                        crate::metrics::SOFT_PIN_KEY_COUNT.inc();
+                        Some(SystemTime::UNIX_EPOCH)
+                    } else {
+                        None
                     },
-                );
+                    tenant_id: tenant_id.clone(),
+                    group_id,
+                    quota_committed: false,
+                    reserved_quota_charge_bytes: requested_quota_charge,
+                    committed_quota_charge_bytes: 0,
+                    pending_replaced_quota_charge_bytes: 0,
+                    memory_cache_total_accounted: false,
+                    disk_cache_total_accounted: false,
+                    disk_allocated_bytes_accounted: 0,
+                    user_key: raw_key.clone(),
+                };
+                sync_cache_total_accounting(&mut object);
+                self.state.objects.insert(key.clone(), object);
                 self.register_tenant_metadata_object(&tenant_id);
                 self.state.processing_keys.insert(key.clone(), ());
                 // Each successful entry exposes writable addresses and must be

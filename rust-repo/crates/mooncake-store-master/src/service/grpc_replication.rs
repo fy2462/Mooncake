@@ -283,6 +283,7 @@ impl MasterServiceImpl {
         } else {
             self.settle_object_quota_if_ready(&mut revoked)?
         };
+        sync_cache_total_accounting(&mut revoked);
         *object = revoked;
         drop(object);
         if remove_object {
@@ -801,6 +802,7 @@ impl MasterServiceImpl {
                 }
                 !matched
             });
+            sync_cache_total_accounting(&mut object);
             remove_object = object.replicas.is_empty();
         }
         if remove_object {
@@ -1027,6 +1029,7 @@ impl MasterServiceImpl {
                 };
                 if let Some(mut object) = self.state.objects.get_mut(&key) {
                     object.replicas.push(replica.clone());
+                    sync_cache_total_accounting(&mut object);
                 }
                 replica
             }
@@ -1353,6 +1356,7 @@ impl MasterServiceImpl {
                 }
                 !matched
             });
+            sync_cache_total_accounting(&mut object);
         }
         // Release source replica refcnt
         if let Some(mut object) = self.state.objects.get_mut(&key) {

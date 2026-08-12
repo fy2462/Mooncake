@@ -110,6 +110,7 @@ fn strict_service_with_unregistered_object(tenant_id: &str, key: &str) -> Master
             pending_replaced_quota_charge_bytes: 0,
             memory_cache_total_accounted: false,
             disk_cache_total_accounted: false,
+            disk_allocated_bytes_accounted: 0,
             user_key: key.to_owned(),
         },
     );

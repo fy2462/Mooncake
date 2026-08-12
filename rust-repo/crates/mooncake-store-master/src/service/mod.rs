@@ -8075,6 +8075,7 @@ mod snapshot_restore_tests {
             pending_replaced_quota_charge_bytes: 0,
             memory_cache_total_accounted: false,
             disk_cache_total_accounted: false,
+            disk_allocated_bytes_accounted: 0,
             user_key: user_key.into(),
         }
     }
@@ -8309,6 +8310,7 @@ mod snapshot_restore_tests {
                     pending_replaced_quota_charge_bytes: 0,
                     memory_cache_total_accounted: false,
                     disk_cache_total_accounted: false,
+                    disk_allocated_bytes_accounted: 0,
                     user_key,
                 },
             ));
@@ -8407,6 +8409,7 @@ mod snapshot_restore_tests {
                 pending_replaced_quota_charge_bytes: 0,
                 memory_cache_total_accounted: false,
                 disk_cache_total_accounted: false,
+                disk_allocated_bytes_accounted: 0,
                 user_key: user_key.into(),
             },
         )];
@@ -8497,6 +8500,7 @@ mod snapshot_restore_tests {
             pending_replaced_quota_charge_bytes: 0,
             memory_cache_total_accounted: false,
             disk_cache_total_accounted: false,
+            disk_allocated_bytes_accounted: 0,
             user_key: user_key.into(),
         };
         let task = ReplicationTaskSnapshotEntry {
@@ -8590,6 +8594,7 @@ mod snapshot_restore_tests {
             pending_replaced_quota_charge_bytes: 0,
             memory_cache_total_accounted: false,
             disk_cache_total_accounted: false,
+            disk_allocated_bytes_accounted: 0,
             user_key: "existing-move-target".into(),
         };
         let task = ReplicationTaskSnapshotEntry {
@@ -9665,6 +9670,7 @@ mod tenant_quota_parity_tests {
             pending_replaced_quota_charge_bytes: 0,
             memory_cache_total_accounted: false,
             disk_cache_total_accounted: false,
+            disk_allocated_bytes_accounted: 0,
             user_key: user_key.to_string(),
         };
         (segment, tenant_id.make_scoped_key(user_key), object)

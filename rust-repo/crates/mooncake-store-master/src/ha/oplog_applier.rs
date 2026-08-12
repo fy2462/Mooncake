@@ -324,6 +324,7 @@ impl OpLogApplier {
                         pending_replaced_quota_charge_bytes: 0,
                         memory_cache_total_accounted: false,
                         disk_cache_total_accounted: false,
+                        disk_allocated_bytes_accounted: 0,
                         user_key,
                     })
                 } else {
@@ -406,6 +407,7 @@ impl OpLogApplier {
                                 pending_replaced_quota_charge_bytes: 0,
                                 memory_cache_total_accounted: false,
                                 disk_cache_total_accounted: false,
+                                disk_allocated_bytes_accounted: 0,
                                 user_key: identity.user_key.clone(),
                             };
                             let Ok(committed_charge) =
@@ -695,6 +697,7 @@ impl OpLogApplier {
             pending_replaced_quota_charge_bytes,
             memory_cache_total_accounted: false,
             disk_cache_total_accounted: false,
+            disk_allocated_bytes_accounted: 0,
             user_key: identity.user_key.clone(),
         };
         let completed_charge = checked_durable_committed_memory_quota_charge(&object).ok()?;
@@ -2056,6 +2059,7 @@ impl OpLogApplier {
             });
             replacement.memory_cache_total_accounted = false;
             replacement.disk_cache_total_accounted = false;
+            replacement.disk_allocated_bytes_accounted = 0;
             let clear_replication_task = replication_task.as_ref().is_some_and(|task| {
                 replacement.replicas.is_empty()
                     || (task.source.segment_id == segment_id
@@ -3564,6 +3568,7 @@ mod tests {
                 pending_replaced_quota_charge_bytes: 0,
                 memory_cache_total_accounted: false,
                 disk_cache_total_accounted: false,
+                disk_allocated_bytes_accounted: 0,
                 user_key: user_key.to_string(),
             },
         );
@@ -3602,6 +3607,7 @@ mod tests {
             pending_replaced_quota_charge_bytes: 0,
             memory_cache_total_accounted: false,
             disk_cache_total_accounted: false,
+            disk_allocated_bytes_accounted: 0,
             user_key: user_key.into(),
         }
     }
@@ -3762,6 +3768,7 @@ mod tests {
             pending_replaced_quota_charge_bytes: 0,
             memory_cache_total_accounted: false,
             disk_cache_total_accounted: false,
+            disk_allocated_bytes_accounted: 0,
             user_key: "overflowing-replication".into(),
         };
         let task = ReplicationTaskEntry {
@@ -3894,6 +3901,7 @@ mod tests {
             pending_replaced_quota_charge_bytes: 0,
             memory_cache_total_accounted: false,
             disk_cache_total_accounted: false,
+            disk_allocated_bytes_accounted: 0,
             user_key: "replication-key".into(),
         };
         let task = ReplicationTaskEntry {
@@ -4007,6 +4015,7 @@ mod tests {
             pending_replaced_quota_charge_bytes: 0,
             memory_cache_total_accounted: false,
             disk_cache_total_accounted: false,
+            disk_allocated_bytes_accounted: 0,
             user_key: "existing-target-move".into(),
         };
         let task = ReplicationTaskEntry {
@@ -4100,6 +4109,7 @@ mod tests {
             pending_replaced_quota_charge_bytes: 0,
             memory_cache_total_accounted: false,
             disk_cache_total_accounted: false,
+            disk_allocated_bytes_accounted: 0,
             user_key: "delayed-release-key".into(),
         };
         let release = crate::service::state::DelayedReplicaReleaseEntry {
@@ -4191,6 +4201,7 @@ mod tests {
             pending_replaced_quota_charge_bytes: 0,
             memory_cache_total_accounted: false,
             disk_cache_total_accounted: false,
+            disk_allocated_bytes_accounted: 0,
             user_key: "delayed-release-in-place-upsert".into(),
         };
         let manager =
@@ -5271,6 +5282,7 @@ mod tests {
                 pending_replaced_quota_charge_bytes: 0,
                 memory_cache_total_accounted: false,
                 disk_cache_total_accounted: false,
+                disk_allocated_bytes_accounted: 0,
                 user_key: "copy-during-unmount".into(),
             },
         );
@@ -6320,6 +6332,7 @@ mod tests {
                 pending_replaced_quota_charge_bytes: 0,
                 memory_cache_total_accounted: false,
                 disk_cache_total_accounted: false,
+                disk_allocated_bytes_accounted: 0,
                 user_key: "k1".to_string(),
             },
         );
@@ -6400,6 +6413,7 @@ mod tests {
                 pending_replaced_quota_charge_bytes: 0,
                 memory_cache_total_accounted: false,
                 disk_cache_total_accounted: false,
+                disk_allocated_bytes_accounted: 0,
                 user_key: "k1".to_string(),
             },
         );

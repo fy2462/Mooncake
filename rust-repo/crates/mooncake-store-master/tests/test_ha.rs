@@ -261,6 +261,7 @@ fn test_local_snapshot_provider_loads_snapshot() {
             pending_replaced_quota_charge_bytes: 0,
             memory_cache_total_accounted: false,
             disk_cache_total_accounted: false,
+            disk_allocated_bytes_accounted: 0,
         },
     );
     backend
@@ -313,6 +314,7 @@ fn test_local_snapshot_provider_prefers_cluster_dir_and_falls_back_to_root() {
             pending_replaced_quota_charge_bytes: 0,
             memory_cache_total_accounted: false,
             disk_cache_total_accounted: false,
+            disk_allocated_bytes_accounted: 0,
         },
     );
     StorageBackend::new(StorageBackendType::LocalDisk, &root.join("cluster-a"))

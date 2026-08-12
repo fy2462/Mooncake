@@ -352,6 +352,20 @@ pub(crate) struct MasterState {
     pub(crate) kv_event_publisher: Arc<KvEventPublisher>,
 }
 
+impl Drop for MasterState {
+    fn drop(&mut self) {
+        // C++ Replica destructors release their process-local disk-byte gauge.
+        // Rust descriptors are plain cloneable DTOs, so the authoritative
+        // object table owns the equivalent final cleanup.
+        for object in self.objects.iter() {
+            if object.disk_allocated_bytes_accounted != 0 {
+                crate::metrics::ALLOCATED_FILE_SIZE
+                    .sub(object.disk_allocated_bytes_accounted.min(i64::MAX as u64) as i64);
+            }
+        }
+    }
+}
+
 impl MasterState {
     pub(crate) fn begin_foreground_request(self: &Arc<Self>) -> Option<ForegroundRequestGuard> {
         if !self.service_available.load(Ordering::Acquire)
@@ -819,6 +833,10 @@ pub struct ObjectEntry {
     /// Whether this object is currently counted in the file-cache inventory gauge.
     #[serde(skip)]
     pub disk_cache_total_accounted: bool,
+    /// Disk/LocalDisk replica bytes already included in the process-wide file gauge.
+    /// Rebuilt from replica descriptors after restore; never persisted.
+    #[serde(skip)]
+    pub disk_allocated_bytes_accounted: u64,
     /// 用户提供的原始 key（不包含租户作用域前缀）。
     /// Original user-provided key (without tenant scope prefix).
     /// C++ equivalent: ObjectMetadata::user_key

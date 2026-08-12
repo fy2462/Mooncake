@@ -150,6 +150,7 @@ impl MasterServiceImpl {
             ));
         };
         object.replicas.push(staged.clone());
+        sync_cache_total_accounting(&mut object);
         drop(object);
         task.staged_segment_id = Some(staged_segment_id);
         task.staged_offset = Some(staged_offset);

@@ -42,6 +42,7 @@ fn make_entry(replicas: Vec<ReplicaDescriptor>, size: u64) -> ObjectEntry {
         pending_replaced_quota_charge_bytes: 0,
         memory_cache_total_accounted: false,
         disk_cache_total_accounted: false,
+        disk_allocated_bytes_accounted: 0,
     }
 }
 

@@ -527,6 +527,7 @@ impl MasterServiceImpl {
                     }
                 }
             };
+            sync_cache_total_accounting(&mut object);
             drop(object);
             if remove_object {
                 if let Some((_, removed_object)) = self.state.objects.remove(&key) {
@@ -823,6 +824,7 @@ impl MasterServiceImpl {
                     }
                 }
             };
+            sync_cache_total_accounting(&mut object);
             // A global-DISK descriptor is also a Put/Upsert write target.
             // Reuse the durable generation predicate so removing the final
             // Memory/NoF target cannot expose an object while DISK is still
