@@ -1171,6 +1171,207 @@ async fn test_cache_hit_metrics_count_memory_and_local_disk_bytes() {
 }
 
 #[tokio::test]
+async fn cpp_parity_master_metrics_test_cpp_mastermetricstest_ssdoffloadcachehitandtotalconsistent()
+{
+    let _guard = METRICS_TEST_LOCK.lock().unwrap();
+    use metrics::CacheHitStat;
+
+    let service = MasterServiceImpl::with_runtime_config(MasterRuntimeConfig {
+        enable_offload: true,
+        promotion_on_hit: false,
+        ..Default::default()
+    });
+    let client_id = Uuid::new_v4();
+    MasterService::mount_segment(
+        &service,
+        Request::new(proto::MountSegmentRequest {
+            client_id: Some(proto_uuid(client_id)),
+            segment_name: "ssd-cache-consistency:1".into(),
+            size: 16 * 1024 * 1024,
+            base_addr: 0x3_0000_0000,
+            te_endpoint: String::new(),
+            protocol: String::new(),
+            host_id: String::new(),
+        }),
+    )
+    .await
+    .unwrap();
+    mount_local_disk(&service, client_id).await;
+
+    let baseline = metrics::calculate_cache_stats();
+    let base_mem_hit_bytes = metrics::MEM_CACHE_HIT_BYTES.get();
+    let base_file_hit_bytes = metrics::FILE_CACHE_HIT_BYTES.get();
+
+    MasterService::put_start(
+        &service,
+        Request::new(proto::PutStartRequest {
+            client_id: Some(proto_uuid(client_id)),
+            key: "ssd_offload_key".into(),
+            slice_length: 2048,
+            tenant_id: String::new(),
+            config: Some(replicate_config("ssd-cache-consistency:1")),
+        }),
+    )
+    .await
+    .unwrap();
+    MasterService::put_end(
+        &service,
+        Request::new(proto::PutEndRequest {
+            client_id: Some(proto_uuid(client_id)),
+            key: "ssd_offload_key".into(),
+            replica_type: proto::replica_descriptor::ReplicaType::Memory as i32,
+            tenant_id: String::new(),
+        }),
+    )
+    .await
+    .unwrap();
+    let after_put = metrics::calculate_cache_stats();
+    assert_eq!(
+        after_put[CacheHitStat::MemoryTotal],
+        baseline[CacheHitStat::MemoryTotal] + 1.0
+    );
+    assert_eq!(
+        after_put[CacheHitStat::SsdTotal],
+        baseline[CacheHitStat::SsdTotal]
+    );
+
+    let heartbeat = MasterService::offload_object_heartbeat(
+        &service,
+        Request::new(proto::OffloadObjectHeartbeatRequest {
+            client_id: Some(proto_uuid(client_id)),
+            enable_offloading: true,
+        }),
+    )
+    .await
+    .unwrap()
+    .into_inner();
+    let task = heartbeat
+        .tasks
+        .into_iter()
+        .find(|task| task.key == "ssd_offload_key")
+        .expect("completed Memory object must be admitted for offload");
+    MasterService::notify_offload_success(
+        &service,
+        Request::new(proto::NotifyOffloadSuccessRequest {
+            client_id: Some(proto_uuid(client_id)),
+            keys: vec!["ssd_offload_key".into()],
+            metadatas: vec![proto::StorageObjectMetadata {
+                bucket_id: 0,
+                offset: 0,
+                key_size: "ssd_offload_key".len() as i64,
+                data_size: 2048,
+                transport_endpoint: "tcp://127.0.0.1:9999".into(),
+            }],
+            tasks: vec![task],
+            recovery_session_id: None,
+        }),
+    )
+    .await
+    .unwrap();
+    let after_offload = metrics::calculate_cache_stats();
+    assert_eq!(
+        after_offload[CacheHitStat::MemoryTotal],
+        baseline[CacheHitStat::MemoryTotal] + 1.0
+    );
+    assert_eq!(
+        after_offload[CacheHitStat::SsdTotal],
+        baseline[CacheHitStat::SsdTotal] + 1.0
+    );
+
+    MasterService::remove(
+        &service,
+        Request::new(proto::RemoveRequest {
+            key: "ssd_offload_key".into(),
+            force: true,
+            tenant_id: String::new(),
+        }),
+    )
+    .await
+    .unwrap();
+    let after_remove = metrics::calculate_cache_stats();
+    assert_eq!(
+        after_remove[CacheHitStat::MemoryTotal],
+        baseline[CacheHitStat::MemoryTotal]
+    );
+    assert_eq!(
+        after_remove[CacheHitStat::SsdTotal],
+        baseline[CacheHitStat::SsdTotal]
+    );
+
+    MasterService::notify_offload_success(
+        &service,
+        Request::new(proto::NotifyOffloadSuccessRequest {
+            client_id: Some(proto_uuid(client_id)),
+            keys: vec!["ssd_only_key".into()],
+            metadatas: vec![proto::StorageObjectMetadata {
+                bucket_id: 0,
+                offset: 0,
+                key_size: "ssd_only_key".len() as i64,
+                data_size: 2048,
+                transport_endpoint: "tcp://127.0.0.1:9998".into(),
+            }],
+            tasks: vec![proto::OffloadTaskItem {
+                tenant_id: "default".into(),
+                key: "ssd_only_key".into(),
+                size: 2048,
+                generation_id: Some(proto_uuid(Uuid::new_v4())),
+            }],
+            recovery_session_id: None,
+        }),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        metrics::calculate_cache_stats()[CacheHitStat::SsdTotal],
+        baseline[CacheHitStat::SsdTotal] + 1.0
+    );
+
+    MasterService::get_replica_list(
+        &service,
+        Request::new(proto::GetReplicaListRequest {
+            key: "ssd_only_key".into(),
+            tenant_id: String::new(),
+        }),
+    )
+    .await
+    .unwrap();
+    let after_get = metrics::calculate_cache_stats();
+    assert_eq!(
+        after_get[CacheHitStat::MemoryHits],
+        baseline[CacheHitStat::MemoryHits]
+    );
+    assert_eq!(
+        after_get[CacheHitStat::SsdHits],
+        baseline[CacheHitStat::SsdHits] + 1.0
+    );
+    assert_eq!(metrics::MEM_CACHE_HIT_BYTES.get(), base_mem_hit_bytes);
+    assert_eq!(
+        metrics::FILE_CACHE_HIT_BYTES.get(),
+        base_file_hit_bytes + 2048
+    );
+
+    MasterService::remove(
+        &service,
+        Request::new(proto::RemoveRequest {
+            key: "ssd_only_key".into(),
+            force: true,
+            tenant_id: String::new(),
+        }),
+    )
+    .await
+    .unwrap();
+    let after_cleanup = metrics::calculate_cache_stats();
+    assert_eq!(
+        after_cleanup[CacheHitStat::MemoryTotal],
+        baseline[CacheHitStat::MemoryTotal]
+    );
+    assert_eq!(
+        after_cleanup[CacheHitStat::SsdTotal],
+        baseline[CacheHitStat::SsdTotal]
+    );
+}
+
+#[tokio::test]
 async fn cpp_parity_cache_stats_discriminants_aliases_and_reuse() {
     let _guard = METRICS_TEST_LOCK.lock().unwrap();
     use metrics::CacheHitStat;

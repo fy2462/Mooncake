@@ -33894,13 +33894,18 @@
     "file": "master_metrics_test.cpp",
     "test": "MasterMetricsTest.SsdOffloadCacheHitAndTotalConsistent"
    },
-   "reason": "Production prerequisite: support the C++ direct/unsolicited LocalDisk offload fixture or provide the smallest equivalent admitted-task path that can create the same-object and LocalDisk-only states; do not claim the current separate heartbeat inventory/hit tests as coverage. Add cpp_parity_ssd_offload_cache_hit_and_total_consistent to mooncake-store-master/tests/test_master_metrics.rs; lock baselines, mount the exact 16-MiB Memory segment, complete one 2,048-byte object, add its LocalDisk replica, assert exact Memory/SSD total/count deltas, make its Remove deterministically eligible by injected/advanced lease expiry (or force only if it preserves the C++ observable successful-Remove result) and assert restoration, create a LocalDisk-only 2,048-byte object, Get it, and assert unchanged Memory hits/bytes plus SSD hits +1 and file bytes +2,048. A deterministic final LocalDisk-only cleanup may run for fixture hygiene, but its result is not a C++ oracle and is neither an acceptance condition nor a prerequisite.",
+   "reason": "The Rust RPC fixture serializes process-wide metric baselines, mounts the exact 16-MiB Memory segment plus a real recovered LocalDisk binding, and completes a 2,048-byte Memory object. The production heartbeat/admitted NotifyOffloadSuccess path adds its LocalDisk replica; exact cache totals prove Memory-only, mixed, and force-removed baseline states. The same production compatibility path then creates an exact 2,048-byte LocalDisk-only object, and GetReplicaList proves Memory hits/bytes unchanged while SSD hits advance once and file hit bytes advance by 2,048. Force removes only the C++ lease wait and preserves its successful Remove result.",
    "review": {
     "oracle": "mooncake-store/tests/master_metrics_test.cpp:791-931, NotifyOffloadSuccess, and mooncake-store-master/tests/test_master_metrics.rs cache tests",
     "reviewed": true
    },
-   "rust": [],
-   "status": "missing"
+   "rust": [
+    {
+     "file": "mooncake-store-master/tests/test_master_metrics.rs",
+     "test": "cpp_parity_master_metrics_test_cpp_mastermetricstest_ssdoffloadcachehitandtotalconsistent"
+    }
+   ],
+   "status": "covered"
   },
   {
    "behavior": "With offload enabled, offload_on_evict=false, offload_force_evict=false, a 2,000-ms lease TTL, 16-MiB Memory, and an offloading-enabled LocalDisk mount, completing key_a1, key_a2, and key_a3 queues exactly those three names immediately at PutEnd.",
