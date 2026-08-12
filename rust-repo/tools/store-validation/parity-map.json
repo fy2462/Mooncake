@@ -13788,7 +13788,10 @@
     "reviewed": true
    },
    "rust": [
-    "mooncake-store-master/tests/test_catalog_snapshot.rs::cpp_parity_embedded_catalog_list_rejects_missing_object_store"
+    {
+     "file": "mooncake-store-master/tests/test_catalog_snapshot.rs",
+     "test": "cpp_parity_embedded_catalog_list_rejects_missing_object_store"
+    }
    ],
    "status": "covered"
   },
@@ -14116,13 +14119,18 @@
     "file": "ha/snapshot/catalog_backed_snapshot_provider_test.cpp",
     "test": "CatalogBackedSnapshotProviderTest.LoadLatestSnapshotRoundTrip"
    },
-   "reason": "test_catalog_provider_loads_synthetic_cpp_wire_shapes reads Rust-synthesized C++-shaped bytes through Embedded storage, but asserts a Memory replica and Rust-specific fields rather than this C++ test's one complete disk replica, disk path/object size, client id, and exact default object contract. test_catalog_provider_publishes_cpp_compatible_snapshot_payloads is likewise a Rust producer/reload case. Neither test uses a C++-emitted payload or Redis, so the C++ Embedded/optional-Redis parameter matrix remains partial.",
+   "reason": "The executable Embedded-provider test publishes the exact C++ default metadata shape (UUID 1-2, key-1, size 4096, one complete Disk replica with the default path/object size), then proves snapshot id and sequence 42 plus every portable object/replica field after production load. Rust normalizes the C++ per-object last sequence to the loaded snapshot baseline rather than storing a duplicate ObjectEntry field; optional Redis execution remains separately tracked by Redis-specific rows.",
    "review": {
-    "oracle": "catalog_backed_snapshot_provider_test.cpp LoadLatestSnapshotRoundTrip, PublishSnapshotPayload/ExpectLoadsDefaultObject in snapshot_test_utils.h, and catalog_backed_snapshot_provider.cpp LoadLatestSnapshot; Rust test_catalog_snapshot.rs synthetic fixture/provider tests",
+    "oracle": "catalog_backed_snapshot_provider_test.cpp LoadLatestSnapshotRoundTrip; PublishSnapshotPayload/ExpectLoadsDefaultObject in snapshot_test_utils.h; rust-repo/crates/mooncake-store-master/tests/test_catalog_snapshot.rs::cpp_parity_catalog_provider_load_latest_snapshot_round_trip",
     "reviewed": true
    },
-   "rust": [],
-   "status": "missing"
+   "rust": [
+    {
+     "file": "mooncake-store-master/tests/test_catalog_snapshot.rs",
+     "test": "cpp_parity_catalog_provider_load_latest_snapshot_round_trip"
+    }
+   ],
+   "status": "covered"
   },
   {
    "behavior": "A snapshot metadata layout with data_type immediately after replica_count loads the same default object with its complete disk replica intact.",
@@ -33542,7 +33550,10 @@
     "reviewed": true
    },
    "rust": [
-    "mooncake-store-master/tests/test_master_metrics.rs::cpp_parity_local_disk_capacity_heartbeat_replaces_not_accumulates"
+    {
+     "file": "mooncake-store-master/tests/test_master_metrics.rs",
+     "test": "cpp_parity_local_disk_capacity_heartbeat_replaces_not_accumulates"
+    }
    ],
    "status": "covered"
   },
@@ -33565,7 +33576,10 @@
     "reviewed": true
    },
    "rust": [
-    "mooncake-store-master/tests/test_master_metrics.rs::cpp_parity_put_start_no_available_handle_metrics"
+    {
+     "file": "mooncake-store-master/tests/test_master_metrics.rs",
+     "test": "cpp_parity_put_start_no_available_handle_metrics"
+    }
    ],
    "status": "covered"
   },

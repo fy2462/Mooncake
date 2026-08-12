@@ -596,10 +596,8 @@ impl CatalogBackedSnapshotProvider {
         } else {
             descriptor.manifest_key.clone()
         };
-        let allocator_config_required = validate_manifest(
-            &self.object_store.download_string(&manifest_key)?,
-            &descriptor.snapshot_id,
-        )?;
+        let allocator_config_required =
+            validate_manifest(&self.object_store.download_string(&manifest_key)?)?;
         let allocator_config =
             load_allocator_config_extension(self.object_store.as_ref(), &prefix)?;
         if allocator_config_required && allocator_config.is_none() {
@@ -707,17 +705,17 @@ struct DecodedSegment {
     entry: SegmentEntry,
     has_allocator: bool,
 }
-fn validate_manifest(manifest: &str, snapshot_id: &str) -> Result<bool, HaError> {
+fn validate_manifest(manifest: &str) -> Result<bool, HaError> {
     let fields: Vec<_> = manifest.trim().split('|').collect();
-    if !(fields.len() == 3 || fields.len() == 4)
-        || fields[0] != MANIFEST_PROTOCOL
-        || fields[1] != MANIFEST_VERSION
-        || (fields[2] != snapshot_id && fields[2] != "rust")
-        || (fields.len() == 4 && fields[3] != RUST_ALLOCATOR_CONFIG_EXTENSION)
-    {
+    // C++ requires two separators and validates only protocol and version;
+    // every trailing field is opaque. The third field is normally a snapshot
+    // id, while its canonical fixture uses `standby-test`.
+    if fields.len() < 3 || fields[0] != MANIFEST_PROTOCOL || fields[1] != MANIFEST_VERSION {
         return Err(snapshot_error("unsupported snapshot manifest"));
     }
-    Ok(fields.len() == 4)
+    // Rust's known allocator extension opts into an additional required
+    // object. Unknown trailing C++ fields retain legacy behavior.
+    Ok(fields.get(3) == Some(&RUST_ALLOCATOR_CONFIG_EXTENSION))
 }
 
 fn encode_segments(snapshot: &LoadedSnapshot) -> Result<Vec<u8>, HaError> {

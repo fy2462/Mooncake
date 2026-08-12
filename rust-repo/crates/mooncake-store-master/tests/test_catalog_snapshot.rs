@@ -531,6 +531,18 @@ fn synthetic_cpp_segments(segment_id: Uuid, client_id: Uuid) -> Vec<u8> {
     ]))
 }
 
+// `BuildSegmentsPayload()` in the C++ snapshot fixture serializes a fresh
+// OFFSET SegmentManager: allocator type zero and four empty collections.
+fn synthetic_cpp_empty_segments() -> Vec<u8> {
+    compress(&Value::Map(vec![
+        ("ma".into(), 0.into()),
+        ("an".into(), Value::Array(Vec::new())),
+        ("ms".into(), Value::Map(Vec::new())),
+        ("cs".into(), Value::Map(Vec::new())),
+        ("ld".into(), Value::Map(Vec::new())),
+    ]))
+}
+
 #[derive(Clone, Copy)]
 enum SyntheticCppMetadataShape {
     V1,
@@ -836,7 +848,7 @@ fn synthetic_cpp_metadata_with_disk_replica(
     let shard = Value::Map(vec![("metadata".into(), Value::Array(vec![item]))]);
     encode(&Value::Map(vec![(
         "shards".into(),
-        Value::Map(vec![(0.into(), Value::Binary(compress(&shard)))]),
+        Value::Map(vec![("0".into(), Value::Binary(compress(&shard)))]),
     )]))
 }
 
@@ -862,12 +874,20 @@ fn publish_disk_replica_fixture(
     lease_timeout_ms: u64,
     shape: SyntheticCppMetadataShape,
 ) -> (tempfile::TempDir, CatalogBackedSnapshotProvider) {
+    publish_disk_replica_fixture_with_snapshot_id(lease_timeout_ms, shape, "20260610_120000_001")
+}
+
+fn publish_disk_replica_fixture_with_snapshot_id(
+    lease_timeout_ms: u64,
+    shape: SyntheticCppMetadataShape,
+    snapshot_id: &str,
+) -> (tempfile::TempDir, CatalogBackedSnapshotProvider) {
     let root = tempdir().unwrap();
     let object_store = Arc::new(LocalFileSnapshotObjectStore::new(root.path().to_path_buf()));
     let catalog = EmbeddedSnapshotCatalogStore::with_object_store(object_store.clone());
     let segment_id = Uuid::new_v4();
     let client_id = Uuid::new_v4();
-    let mut descriptor = SnapshotDescriptor::new("20260610_120000_001");
+    let mut descriptor = SnapshotDescriptor::new(snapshot_id);
     descriptor.last_included_seq = 42;
     catalog.publish(&descriptor).unwrap();
     object_store
@@ -888,6 +908,37 @@ fn publish_disk_replica_fixture(
             &synthetic_cpp_metadata_with_disk_replica(lease_timeout_ms, shape),
         )
         .unwrap();
+    let provider = CatalogBackedSnapshotProvider::new("cluster-a", Box::new(catalog), object_store);
+    (root, provider)
+}
+
+fn publish_cpp_default_round_trip_fixture() -> (tempfile::TempDir, CatalogBackedSnapshotProvider) {
+    let root = tempdir().unwrap();
+    let object_store = Arc::new(LocalFileSnapshotObjectStore::new(root.path().to_path_buf()));
+    let catalog = EmbeddedSnapshotCatalogStore::with_object_store(object_store.clone());
+    let mut descriptor = SnapshotDescriptor::new("20240330_120000_001");
+    descriptor.last_included_seq = 42;
+    descriptor.producer_view_version = 7;
+    descriptor.created_at_ms = 1_700_000_000_000;
+    object_store
+        .upload_string(&descriptor.manifest_key, "messagepack|1.0.0|standby-test")
+        .unwrap();
+    object_store
+        .upload_buffer(
+            &format!("{}segments", descriptor.object_prefix),
+            &synthetic_cpp_empty_segments(),
+        )
+        .unwrap();
+    object_store
+        .upload_buffer(
+            &format!("{}metadata", descriptor.object_prefix),
+            &synthetic_cpp_metadata_with_disk_replica(
+                4_102_444_800_000,
+                SyntheticCppMetadataShape::V1,
+            ),
+        )
+        .unwrap();
+    catalog.publish(&descriptor).unwrap();
     let provider = CatalogBackedSnapshotProvider::new("cluster-a", Box::new(catalog), object_store);
     (root, provider)
 }
@@ -947,6 +998,31 @@ fn cpp_parity_catalog_provider_loads_default_disk_object_for_each_metadata_shape
         assert_eq!(replica.segment_name, "/tmp/mooncake_snapshot_disk.data");
         assert_eq!(replica.size, 4096);
     }
+}
+
+#[test]
+fn cpp_parity_catalog_provider_load_latest_snapshot_round_trip() {
+    let (_root, provider) = publish_cpp_default_round_trip_fixture();
+
+    let snapshot = provider.load_latest_snapshot("cluster-a").unwrap().unwrap();
+
+    assert_eq!(snapshot.snapshot_id, "20240330_120000_001");
+    assert_eq!(snapshot.snapshot_sequence_id, 42);
+    assert_eq!(snapshot.objects.len(), 1);
+    let (scoped_key, object) = &snapshot.objects[0];
+    assert_eq!(scoped_key, "default\0key-1");
+    assert_eq!(object.user_key, "key-1");
+    assert_eq!(object.client_id, Uuid::from_u64_pair(1, 2));
+    assert_eq!(object.size, 4096);
+    assert_eq!(object.data_type, ObjectDataType::Unknown);
+    assert!(!object.hard_pinned);
+    assert!(object.group_id.is_empty());
+    assert_eq!(object.replicas.len(), 1);
+    let replica = &object.replicas[0];
+    assert_eq!(replica.status, ReplicaStatus::Complete);
+    assert_eq!(replica.replica_type, ReplicaType::Disk);
+    assert_eq!(replica.segment_name, "/tmp/mooncake_snapshot_disk.data");
+    assert_eq!(replica.size, 4096);
 }
 
 #[test]
@@ -1732,7 +1808,7 @@ fn test_catalog_provider_falls_back_when_latest_manifest_is_corrupt() {
     object_store
         .upload_string(
             &latest_descriptor.manifest_key,
-            "messagepack|1.0.0|wrong-snapshot",
+            "unsupported|1.0.0|wrong-snapshot",
         )
         .unwrap();
 
