@@ -1,4 +1,4 @@
-file(GLOB ENGINE_SOURCES "*.cpp")
+file(GLOB ENGINE_SOURCES "*.cpp" "shared_segment/*.cpp")
 add_subdirectory(common)
 add_subdirectory(transport)
 
@@ -11,6 +11,10 @@ if(USE_HIP)
 endif()
 
 add_library(transfer_engine ${ENGINE_SOURCES} $<TARGET_OBJECTS:transport>)
+# Private headers live next to the .cpp sources. USE_HIP hipifies into the build
+# tree and needs this path explicitly.
+target_include_directories(transfer_engine
+                           PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/shared_segment)
 if(BUILD_SHARED_LIBS)
   install(TARGETS transfer_engine DESTINATION lib)
 endif()
@@ -63,15 +67,23 @@ if(USE_BAREX)
 endif()
 
 if(USE_CUDA)
-  target_include_directories(transfer_engine PRIVATE /usr/local/cuda/include)
+  target_include_directories(transfer_engine PRIVATE ${CUDAToolkit_INCLUDE_DIRS})
   if(USE_CXI)
-    target_link_libraries(transfer_engine PUBLIC cuda cudart rt)
+    target_link_libraries(transfer_engine PUBLIC CUDA::cuda_driver CUDA::cudart rt)
   else()
-    target_link_libraries(transfer_engine PUBLIC cuda cudart rt mlx5)
+    target_link_libraries(transfer_engine PUBLIC CUDA::cuda_driver CUDA::cudart rt mlx5)
   endif()
   if(USE_NVMEOF)
     target_link_libraries(transfer_engine PUBLIC nvmeof_transport cufile)
   endif()
+endif()
+
+if(USE_NCCL_DEVICE OR USE_NCCL_HOST)
+  target_link_libraries(transfer_engine PUBLIC NCCL::nccl)
+endif()
+
+if(USE_SUPA)
+  target_link_libraries(transfer_engine PUBLIC supa supart)
 endif()
 
 if(USE_MACA)

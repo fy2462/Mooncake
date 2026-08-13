@@ -186,6 +186,20 @@ enum class BucketEvictionPolicy {
     LRU,   // Evict least recently read bucket first
 };
 
+inline std::ostream& operator<<(std::ostream& os,
+                                const BucketEvictionPolicy& policy) {
+    switch (policy) {
+        case BucketEvictionPolicy::NONE:
+            return os << "none";
+        case BucketEvictionPolicy::FIFO:
+            return os << "fifo";
+        case BucketEvictionPolicy::LRU:
+            return os << "lru";
+        default:
+            return os << "unknown";
+    }
+}
+
 struct BucketBackendConfig {
     int64_t bucket_size_limit =
         256 * kMB;  // Max total size of a single bucket (256 MB)
@@ -300,6 +314,8 @@ struct FileStorageConfig {
     // Size of the local client-side buffer (used for caching or batching)
     int64_t local_buffer_size = 1280 * kMB;  // ~1.2 GB
 
+    int64_t pinned_restore_arena_size = 0;
+
     // Limits for scanning and iteration operations
     int64_t scanmeta_iterator_keys_limit =
         20000;  // Max number of keys returned per Scan call, required by bucket
@@ -319,6 +335,8 @@ struct FileStorageConfig {
     // Use io_uring for file I/O instead of POSIX pread/pwrite
     bool use_uring = false;
 
+    // DFS page-offset mode. Enabled automatically for kDistributed.
+    bool enable_dfs = false;
     // Proactively evict local disk objects from the heartbeat thread once
     // backend usage crosses the high watermark.
     bool enable_disk_watermark_eviction = true;
@@ -345,6 +363,7 @@ struct FileStorageConfig {
 class StorageBackendInterface {
    public:
     StorageBackendInterface(const FileStorageConfig& file_storage_config);
+    virtual ~StorageBackendInterface() = default;
 
     using EvictionHandler = std::function<tl::expected<void, ErrorCode>(
         const std::vector<std::string>& evicted_keys)>;
@@ -383,6 +402,10 @@ class StorageBackendInterface {
         std::function<bool(const std::string& key)> /* predicate */) {
         // Default: no-op (no test failures injected)
     }
+
+    // Remove all persisted objects from disk. Called during RemoveAll to
+    // clean up physical SSD files alongside master metadata deletion.
+    virtual void RemoveAll() {}
 
     virtual tl::expected<std::vector<std::string>, ErrorCode>
     EvictAboveDiskWatermark(double /* high_watermark_ratio */,
@@ -423,28 +446,39 @@ class StorageBackend {
      * @param fsdir  subdirectory name
      * @param enable_eviction Whether to enable disk eviction feature (default:
      * true) Note: Eviction is controlled by the enable_eviction parameter
-     * @return shared_ptr to new instance or nullptr if directory is invalid
+     * @return shared_ptr to new instance, or INVALID_PARAMS if the
+     * configuration is invalid
      *
      * Performs validation of the root directory before creating the instance:
      * - Verifies directory exists
      * - Verifies path is actually a directory
+     * - Verifies fsdir is not empty
      */
-    static std::shared_ptr<StorageBackend> Create(const std::string& root_dir,
-                                                  const std::string& fsdir,
-                                                  bool enable_eviction = true) {
+    static tl::expected<std::shared_ptr<StorageBackend>, ErrorCode> Create(
+        const std::string& root_dir, const std::string& fsdir,
+        bool enable_eviction = true) {
         namespace fs = std::filesystem;
-        if (!fs::exists(root_dir)) {
-            LOG(INFO) << "Root directory does not exist: " << root_dir;
-            return nullptr;
-        } else if (!fs::is_directory(root_dir)) {
-            LOG(INFO) << "Root path is not a directory: " << root_dir;
-            return nullptr;
-        } else if (fsdir.empty()) {
-            LOG(INFO) << "FSDIR cannot be empty";
-            return nullptr;
+        std::error_code ec;
+        const auto root_status = fs::status(root_dir, ec);
+        if (ec) {
+            LOG(ERROR) << "Failed to access root directory: " << root_dir
+                       << " (error: " << ec.message() << ")";
+            return tl::make_unexpected(ErrorCode::INVALID_PARAMS);
         }
-
-        fs::path root_path(root_dir);
+        if (!fs::exists(root_status)) {
+            LOG(ERROR) << "Root directory does not exist: " << root_dir
+                       << ". Please create it first or fix the configured "
+                          "storage root directory.";
+            return tl::make_unexpected(ErrorCode::INVALID_PARAMS);
+        }
+        if (!fs::is_directory(root_status)) {
+            LOG(ERROR) << "Root path is not a directory: " << root_dir;
+            return tl::make_unexpected(ErrorCode::INVALID_PARAMS);
+        }
+        if (fsdir.empty()) {
+            LOG(ERROR) << "FSDIR cannot be empty";
+            return tl::make_unexpected(ErrorCode::INVALID_PARAMS);
+        }
 
         std::string real_fsdir = "moon_" + fsdir;
         return std::make_shared<StorageBackend>(root_dir, real_fsdir,
@@ -771,6 +805,8 @@ class StorageBackendAdaptor : public StorageBackendInterface {
         test_failure_predicate_ = std::move(predicate);
     }
 
+    void RemoveAll() override;
+
     tl::expected<std::vector<std::string>, ErrorCode> EvictAboveDiskWatermark(
         double high_watermark_ratio, double low_watermark_ratio,
         EvictionHandler eviction_handler = nullptr) override;
@@ -897,6 +933,8 @@ class BucketStorageBackend : public StorageBackendInterface {
      * - On failure: 返回错误码（例如 IO/内部错误）。
      */
     tl::expected<bool, ErrorCode> IsEnableOffloading() override;
+
+    void RemoveAll() override;
 
     /**
      * @brief 根据后端 bucket 限制（keys/size）将 offloading_objects 分桶。
@@ -1086,6 +1124,12 @@ class BucketStorageBackend : public StorageBackendInterface {
     tl::expected<std::shared_ptr<StorageFile>, ErrorCode> GetFileInstance()
         const;
 
+    // Test-only: number of entries in the LRU eviction index.
+    size_t GetLruIndexSizeForTest() const {
+        SharedMutexLocker lock(&mutex_, shared_lock);
+        return lru_index_.size();
+    }
+
    private:
     // Alignment helper functions for O_DIRECT I/O
     static constexpr size_t kDirectIOAlignment = 4096;
@@ -1243,6 +1287,8 @@ class OffsetAllocatorStorageBackend : public StorageBackendInterface {
     int64_t GetEvictionSkips() const {
         return eviction_skips_.load(std::memory_order_relaxed);
     }
+
+    void RemoveAll() override;
 
     // On-disk record layout v3 (single definition, shared by the write,
     // read and recovery paths of this backend, and by future DMA writers
@@ -1485,8 +1531,12 @@ class OffsetAllocatorStorageBackend : public StorageBackendInterface {
     // Thread-safe allocator managing free space within [0, capacity_) range
     std::shared_ptr<offset_allocator::OffsetAllocator> allocator_;
 
-    // File handle wrapper for I/O operations using preadv/pwritev
-    std::unique_ptr<StorageFile> data_file_;
+    // File handle wrapper for I/O operations using preadv/pwritev. Held as a
+    // shared_ptr so that an in-flight BatchLoad (which copies it into its
+    // ReadPlan under the shard lock) keeps the old file alive while RemoveAll
+    // rebinds this member to a freshly rebuilt file. Avoids use-after-free
+    // when RemoveAll runs concurrently with a reader on another thread.
+    std::shared_ptr<StorageFile> data_file_;
 
     // Sharded metadata maps: one map per shard with its own lock (prevents data
     // races)

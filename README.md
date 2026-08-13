@@ -19,11 +19,13 @@
   [![Docker](https://img.shields.io/docker/v/kvcacheai/mooncake?label=docker&logo=docker&logoColor=white&color=2496ED)](https://hub.docker.com/r/kvcacheai/mooncake)
   <br />
 
-  [![PyPI](https://img.shields.io/pypi/v/mooncake-transfer-engine)](https://pypi.org/project/mooncake-transfer-engine)
   [![PyPI CUDA <=12.9](https://img.shields.io/static/v1?label=pypi&message=CUDA%20%3C%3D12.9&color=76B900)](https://pypi.org/project/mooncake-transfer-engine)
   [![PyPI CUDA 13.0/13.1](https://img.shields.io/static/v1?label=pypi&message=CUDA%2013.0%2F13.1&color=76B900)](https://pypi.org/project/mooncake-transfer-engine-cuda13)
   [![PyPI Non-CUDA](https://img.shields.io/static/v1?label=pypi&message=non-CUDA&color=00BFFF)](https://pypi.org/project/mooncake-transfer-engine-non-cuda/)
   [![PyPI NPU](https://img.shields.io/static/v1?label=pypi&message=NPU&color=F87171)](https://pypi.org/project/mooncake-transfer-engine-npu/)
+  [![PyPI MUSA](https://img.shields.io/static/v1?label=pypi&message=MUSA&color=F97316)](https://pypi.org/project/mooncake-transfer-engine-musa/)
+  [![PyPI EFA CUDA 12](https://img.shields.io/static/v1?label=pypi&message=EFA%20%2B%20CUDA%2012&color=F59E0B)](https://pypi.org/project/mooncake-transfer-engine-efa/)
+  [![PyPI EFA Non-CUDA](https://img.shields.io/static/v1?label=pypi&message=EFA%20non-CUDA&color=F59E0B)](https://pypi.org/project/mooncake-transfer-engine-efa-non-cuda/)
 </div>
 <br/>
 
@@ -196,7 +198,7 @@ Mooncake supports hardware backends across accelerator vendors, cloud fabrics, a
 
 | <img src="image/partners/nvidia_logo.png" width="120" alt="NVIDIA"/> | <img src="image/partners/huawei_logo.png" width="120" alt="Huawei"/> | <img src="image/partners/amd_logo.png" width="120" alt="AMD"/> | <img src="image/hardwares/cambricon_logo.png" width="120" alt="Cambricon"/> | <img src="image/partners/moore_thread_logo.jpg" width="120" alt="Moore Threads"/> | <img src="image/partners/aws-logo.png" width="120" alt="AWS"/> |
 | --- | --- | --- | --- | --- | --- |
-| <img src="image/hardwares/MetaX_logo.png" width="120" alt="MetaX"/> | <img src="image/hardwares/T-Head_logo.png" width="120" alt="T-Head"/> | <img src="image/partners/aliyun_logo.png" width="120" alt="Alibaba Cloud"/> | <img src="image/partners/sunrise_logo.png" width="120" alt="Sunrise"/> | <img src="image/partners/hygon_logo.png" width="120" alt="Hygon"/> | |
+| <img src="image/hardwares/MetaX_logo.png" width="120" alt="MetaX"/> | <img src="image/hardwares/T-Head_logo.png" width="120" alt="T-Head"/> | <img src="image/partners/aliyun_logo.png" width="120" alt="Alibaba Cloud"/> | <img src="image/partners/sunrise_logo.png" width="120" alt="Sunrise"/> | <img src="image/partners/hygon_logo.png" width="120" alt="Hygon"/> | <img src="image/hardwares/biren_logo.png" width="120" alt="Biren Technology"/> |
 
 <h2 id="quick-start">🚀 Getting Started</h2>
 

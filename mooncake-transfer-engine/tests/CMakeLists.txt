@@ -24,6 +24,15 @@ target_link_libraries(endpoint_store_test PUBLIC transfer_engine gtest
                                                  gtest_main)
 add_test(NAME endpoint_store_test COMMAND endpoint_store_test)
 
+# Fingerprint, blob and option checks run without a VMM backend.
+add_executable(shared_segment_test ${WORKSPACE}/shared_segment_test.cpp)
+target_include_directories(
+  shared_segment_test
+  PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../src/shared_segment)
+target_link_libraries(shared_segment_test PUBLIC transfer_engine gtest
+                                                 gtest_main)
+add_test(NAME shared_segment_test COMMAND shared_segment_test)
+
 add_executable(rdma_endpoint_state_test
                ${WORKSPACE}/rdma_endpoint_state_test.cpp)
 target_link_libraries(rdma_endpoint_state_test PUBLIC transfer_engine gtest
@@ -50,6 +59,12 @@ target_link_libraries(rdma_loopback_test PUBLIC transfer_engine gtest
                                                 gtest_main)
 # add_test(NAME rdma_loopback_test COMMAND rdma_loopback_test)
 
+# Regression test for #2017 (registerLocalMemory must auto-chunk buffers larger
+# than the device max_mr_size; loopback WRITE past the boundary must succeed).
+add_executable(rdma_large_mr_test ${WORKSPACE}/rdma_large_mr_test.cpp)
+target_link_libraries(rdma_large_mr_test PUBLIC transfer_engine gtest gtest_main )
+# add_test(NAME rdma_large_mr_test COMMAND rdma_large_mr_test)  # needs an RDMA dev + metadata server
+
 # This test verifies endpoint re-establishment in RDMATransport.
 add_executable(rdma_endpoint_reestablish_test
                ${WORKSPACE}/rdma_endpoint_reestablish_test.cpp)
@@ -63,6 +78,22 @@ endif()
 add_test(NAME rdma_endpoint_reestablish_test
          COMMAND rdma_endpoint_reestablish_test)
 set_tests_properties(rdma_endpoint_reestablish_test PROPERTIES LABELS "rdma")
+
+# Regression test for the edge-triggered async event fd: one epoll wakeup must
+# drain the whole queue. Wraps ibv_get_async_event to script the event source,
+# so it needs no RDMA device. -Wl,--wrap is a GNU ld / lld feature that Apple's
+# linker lacks, and the test is meaningless without it, so skip the target there
+# rather than build one that calls the real symbols.
+if(UNIX AND NOT APPLE)
+  add_executable(rdma_async_event_drain_test
+                 ${WORKSPACE}/rdma_async_event_drain_test.cpp)
+  target_link_libraries(rdma_async_event_drain_test PUBLIC transfer_engine
+                                                           gtest gtest_main)
+  target_link_options(
+    rdma_async_event_drain_test PRIVATE "-Wl,--wrap=ibv_get_async_event"
+    "-Wl,--wrap=ibv_ack_async_event")
+  add_test(NAME rdma_async_event_drain_test COMMAND rdma_async_event_drain_test)
+endif()
 
 if(USE_CXL)
   add_executable(cxl_transport_test ${WORKSPACE}/cxl_transport_test.cpp)
@@ -91,6 +122,8 @@ if(USE_TCP)
 
   add_executable(tcp_write_visibility_test
                  ${WORKSPACE}/tcp_write_visibility_test.cpp)
+  target_compile_definitions(tcp_write_visibility_test
+                             PRIVATE MOONCAKE_TCP_TRANSPORT_TEST_HOOKS)
   target_link_libraries(tcp_write_visibility_test PUBLIC transfer_engine gtest
                                                          gtest_main)
   add_test(NAME tcp_write_visibility_test COMMAND tcp_write_visibility_test)
@@ -299,6 +332,13 @@ target_link_libraries(rdma_context_reprobe_test PUBLIC transfer_engine gtest
                                                        gtest_main)
 add_test(NAME rdma_context_reprobe_test COMMAND rdma_context_reprobe_test)
 
+add_executable(rdma_transport_submit_task_test
+               ${WORKSPACE}/rdma_transport_submit_task_test.cpp)
+target_link_libraries(rdma_transport_submit_task_test PUBLIC transfer_engine
+                                                             gtest gtest_main)
+add_test(NAME rdma_transport_submit_task_test
+         COMMAND rdma_transport_submit_task_test)
+
 add_executable(topology_test ${WORKSPACE}/topology_test.cpp)
 target_link_libraries(topology_test PUBLIC transfer_engine gtest gtest_main)
 add_test(NAME topology_test COMMAND topology_test)
@@ -336,10 +376,42 @@ if(ENABLE_MULTI_PROTOCOL)
 endif()
 
 add_executable(graceful_shutdown_test ${WORKSPACE}/graceful_shutdown_test.cpp)
-target_link_libraries(graceful_shutdown_test PUBLIC transfer_engine gtest
-                                                    gtest_main)
+target_link_libraries(graceful_shutdown_test PUBLIC transfer_engine gtest)
 add_test(NAME graceful_shutdown_test COMMAND graceful_shutdown_test)
 
 add_executable(show_links_test ${WORKSPACE}/show_links_test.cpp)
 target_link_libraries(show_links_test PUBLIC transfer_engine gtest gtest_main)
 add_test(NAME show_links_test COMMAND show_links_test)
+
+# The NCCL transport library target compiles only host-side setup, while the
+# CUDA example that includes the device helpers is opt-in. This probe instantiates
+# one consumer kernel against both header-only NCCL and IBGDA helpers so a
+# call-shape regression fails the build. Keep nvcc optional for host-only
+# DeviceTransport builds that consume JIT kernels.
+if(USE_NCCL_DEVICE AND NOT USE_CXI)
+  if(CMAKE_VERSION VERSION_LESS 3.18)
+    message(STATUS
+      "Skipping NCCL/IBGDA device API compatibility compile test: "
+      "CMake 3.18+ is required for CUDA C++17")
+  else()
+    include(CheckLanguage)
+    check_language(CUDA)
+    if(CMAKE_CUDA_COMPILER)
+      enable_language(CUDA)
+      add_library(device_backend_api_compatibility_test OBJECT
+                  ${WORKSPACE}/device_backend_api_compatibility_test.cu)
+      target_include_directories(device_backend_api_compatibility_test PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/../include)
+      target_link_libraries(device_backend_api_compatibility_test PRIVATE
+        NCCL::nccl)
+      target_compile_options(device_backend_api_compatibility_test PRIVATE
+        $<$<COMPILE_LANGUAGE:CUDA>:--expt-relaxed-constexpr>)
+      set_target_properties(device_backend_api_compatibility_test PROPERTIES
+        CUDA_STANDARD 17 CUDA_STANDARD_REQUIRED ON CUDA_EXTENSIONS OFF)
+    else()
+      message(STATUS
+        "Skipping NCCL/IBGDA device API compatibility compile test: "
+        "nvcc not found")
+    endif()
+  endif()
+endif()

@@ -204,6 +204,19 @@ if(USE_HIP)
   add_test(NAME tent_rocm_platform_test COMMAND tent_rocm_platform_test)
 endif()
 
+if(TARGET tent_xport_gds)
+  add_executable(tent_gds_transport_status_test gds_transport_status_test.cpp)
+  target_link_libraries(tent_gds_transport_status_test PRIVATE gtest gtest_main
+                                                               tent_link_group)
+  target_link_options(
+    tent_gds_transport_status_test PRIVATE "-Wl,--wrap=cuFileDriverOpen"
+    "-Wl,--wrap=cuFileBatchIOGetStatus" "-Wl,--wrap=cuFileBatchIOCancel")
+  target_include_directories(tent_gds_transport_status_test
+                             PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../include)
+  add_test(NAME tent_gds_transport_status_test
+           COMMAND tent_gds_transport_status_test)
+endif()
+
 if(USE_SUNRISE)
   add_executable(tent_sunrise_link_transport_test
                  sunrise_link_transport_test.cpp)
@@ -245,6 +258,18 @@ target_link_libraries(tent_transport_selector_test PRIVATE gtest gtest_main
 target_include_directories(tent_transport_selector_test
                            PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../include)
 add_test(NAME tent_transport_selector_test COMMAND tent_transport_selector_test)
+
+if(USE_UB)
+  add_executable(
+    tent_ub_teardown_test
+    ub_teardown_test.cpp ../src/transport/ub/buffers.cpp
+    ../src/transport/ub/context.cpp ../src/transport/ub/jfc.cpp)
+  target_link_libraries(tent_ub_teardown_test PRIVATE tent_common gtest
+                                                      gtest_main)
+  target_include_directories(tent_ub_teardown_test
+                             PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../include)
+  add_test(NAME tent_ub_teardown_test COMMAND tent_ub_teardown_test)
+endif()
 
 # End-to-end failover test: drives real TransferEngineImpl with
 # FaultProxyTransport-wrapped fakes to exercise resubmitTransferTask.

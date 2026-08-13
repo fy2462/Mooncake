@@ -9,6 +9,7 @@ rpc_enable_tcp_no_delay: true
 
 default_kv_lease_ttl: 10000
 default_kv_soft_pin_ttl: 1800000
+max_kv_soft_pin_ttl: 86400000
 allow_evict_soft_pinned_objects: true
 eviction_ratio: 0.1
 # Overrides the 0.90 code default. A value of 1.0 disables proactive
@@ -25,6 +26,13 @@ root_fs_dir: ""
 cluster_id: "mooncake_cluster"
 memory_allocator: "offset"
 client_live_ttl_sec: 60
+
+# OpLog store configuration for HA hot-standby replication
+enable_oplog: false
+# Batch standby base polling/retry delay in milliseconds
+oplog_poll_interval_ms: 1000
+# Maximum consecutive retryable batch-standby failure window in seconds
+batch_oplog_retry_timeout_sec: 180
 
 enable_http_metadata_server: false
 http_metadata_server_host: "0.0.0.0"
