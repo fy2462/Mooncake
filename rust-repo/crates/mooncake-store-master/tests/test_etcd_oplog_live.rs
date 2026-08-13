@@ -739,6 +739,83 @@ async fn cpp_parity_high_availability_test_etcd_store_prefix_watch_cancel_does_n
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn cpp_parity_high_availability_test_etcd_store_client_reset_triggers_prefix_watch_broken_and_reconnect()
+ {
+    let Some(mut fixture) = LiveEtcdFixture::new("watch-reset").await else {
+        return;
+    };
+    let fault_tx = fixture.store.install_watch_fault_injection();
+    let mut notifier = fixture
+        .store
+        .create_change_notifier()
+        .expect("etcd oplog store exposes its production prefix notifier");
+    let (entry_tx, entry_rx) = std::sync::mpsc::channel();
+    let (error_tx, error_rx) = std::sync::mpsc::channel();
+    notifier
+        .start(
+            1,
+            Box::new(move |entry| entry_tx.send(entry).unwrap()),
+            Box::new(move |error| error_tx.send(error).unwrap()),
+        )
+        .unwrap();
+
+    let healthy_deadline = Instant::now() + Duration::from_secs(5);
+    while !notifier.is_healthy() && Instant::now() < healthy_deadline {
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert!(notifier.is_healthy(), "prefix watch becomes active");
+
+    fixture
+        .store
+        .append(&opaque_record(fixture.view, "watch-reset-value1"))
+        .unwrap();
+    fixture.store.flush_async().await.unwrap();
+    let first = entry_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+    assert_eq!(first.seq, 1);
+    assert_eq!(first.payload, "watch-reset-value1");
+
+    // Inject a transport failure in the live watch, matching the C++ global
+    // client reset.
+    fault_tx.send(1).unwrap();
+    let broken = error_rx
+        .recv_timeout(Duration::from_secs(5))
+        .expect("transport failure must report a broken watch");
+    assert!(
+        broken
+            .to_string()
+            .contains("injected etcd watch transport failure"),
+        "unexpected broken reason: {broken}"
+    );
+
+    let reconnect_deadline = Instant::now() + Duration::from_secs(10);
+    while !notifier.is_healthy() && Instant::now() < reconnect_deadline {
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert!(notifier.is_healthy(), "prefix watch reconnects after reset");
+
+    // The reconnect path re-delivers the last historical entry before the new
+    // watch goes live. Drain that at-least-once replay so the later event is
+    // the one we assert on.
+    let redelivered = entry_rx
+        .recv_timeout(Duration::from_secs(5))
+        .expect("reconnect re-delivers the last seen entry");
+    assert_eq!(redelivered.seq, 1);
+
+    fixture
+        .store
+        .append(&opaque_record(fixture.view, "watch-reset-value2"))
+        .unwrap();
+    fixture.store.flush_async().await.unwrap();
+    let second = entry_rx
+        .recv_timeout(Duration::from_secs(5))
+        .expect("new watch receives a later event after reset");
+    assert_eq!(second.seq, 2);
+    assert_eq!(second.payload, "watch-reset-value2");
+
+    notifier.stop();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn cpp_parity_ha_oplog_etcd_oplog_store_test_cpp_etcdoplogstoretest_testwriteoplog() {
     let Some(mut fixture) = LiveEtcdFixture::new("write").await else {
         return;
@@ -942,6 +1019,60 @@ async fn cpp_parity_ha_oplog_etcd_oplog_store_test_cpp_etcdoplogstoretest_testge
     fixture.store.flush_async().await.unwrap();
 
     assert_eq!(fixture.latest_from_etcd().await, 2);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn cpp_parity_etcd_oplog_store_idempotent_replay() {
+    let Some(mut fixture) = LiveEtcdFixture::new("idempotent-replay").await else {
+        return;
+    };
+
+    // `append` assigns sequence 1 and buffers the entry.
+    let record = put_end_record(fixture.view, "idem-key", "idem-value");
+    let sequence = fixture.store.append(&record).unwrap();
+    assert_eq!(sequence, 1);
+
+    // Plant the same sequence key directly, simulating a prior commit whose
+    // response was lost, so the atomic create-CAS transaction conflicts.
+    fixture
+        .client
+        .put(
+            format!("{}/{sequence:020}", fixture.prefix),
+            b"already-committed",
+            None,
+        )
+        .await
+        .expect("plant conflicting entry key");
+
+    // The flush must fall back to per-key Put (overwrite) rather than poison.
+    fixture.store.flush_async().await.unwrap();
+    assert_eq!(fixture.latest_from_etcd().await, sequence);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn cpp_parity_etcd_oplog_store_batch_update_publishes_latest() {
+    let Some(mut fixture) = LiveEtcdFixture::new("batch-update").await else {
+        return;
+    };
+
+    fixture.store.update_latest_sequence_id(999).unwrap();
+    for i in 0..5u64 {
+        let sequence = 1000 + i;
+        assert_eq!(
+            fixture
+                .store
+                .append(&put_end_record(
+                    fixture.view,
+                    &format!("batch_key_{i}"),
+                    &format!("batch_val_{i}"),
+                ))
+                .unwrap(),
+            sequence
+        );
+    }
+    fixture.store.flush_async().await.unwrap();
+
+    assert_eq!(fixture.latest_from_etcd().await, 1004);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

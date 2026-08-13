@@ -53,3 +53,4 @@ pub mod offload;
 pub mod promotion;
 pub mod remote_pull;
 pub mod segment;
+pub(crate) mod segment_catalog;

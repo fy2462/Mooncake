@@ -15,6 +15,7 @@ pub(crate) mod lifecycle;
 mod lifecycle_state;
 mod metrics;
 pub(crate) use metrics::ClientMetrics;
+pub(crate) mod drain;
 pub(crate) mod nof_register;
 pub(crate) mod offload_read;
 pub(crate) mod read;

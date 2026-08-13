@@ -45,6 +45,8 @@ pub struct EtcdOpLogStore {
     writer_fence: Option<EtcdWriterFence>,
     /// Prevent a failed append from being committed by a later caller.
     poisoned: Option<String>,
+    /// Test-only trigger used to inject a live watch transport failure.
+    watch_fault_tx: Option<tokio::sync::watch::Sender<u32>>,
 }
 
 #[derive(Clone)]
@@ -133,6 +135,7 @@ impl EtcdOpLogStore {
             buffer: Vec::new(),
             writer_fence,
             poisoned: None,
+            watch_fault_tx: None,
         };
         store.recover().await?;
         Ok(store)
@@ -146,7 +149,16 @@ impl EtcdOpLogStore {
             buffer: Vec::new(),
             writer_fence: None,
             poisoned: self.poisoned.clone(),
+            watch_fault_tx: self.watch_fault_tx.clone(),
         }
+    }
+
+    /// Install a one-shot watch-fault trigger for live reconnect tests.
+    #[doc(hidden)]
+    pub fn install_watch_fault_injection(&mut self) -> tokio::sync::watch::Sender<u32> {
+        let (sender, _receiver) = tokio::sync::watch::channel(0u32);
+        self.watch_fault_tx = Some(sender.clone());
+        sender
     }
 
     fn writer_fence(&self) -> Result<&EtcdWriterFence, HaError> {
@@ -162,6 +174,19 @@ impl EtcdOpLogStore {
             CompareOp::Equal,
             fence.producer_revision,
         ))
+    }
+
+    /// Confirm the leader election fence is still held.
+    async fn fence_is_valid(&self, fence: &EtcdWriterFence) -> Result<bool, HaError> {
+        let mut client = self.client.clone();
+        let response = client
+            .get(fence.election_key.as_bytes(), None)
+            .await
+            .map_err(|error| {
+                HaError::InvalidBackend(format!("etcd read oplog writer fence: {error}"))
+            })?;
+        let current = response.kvs().first().map(|kv| kv.mod_revision());
+        Ok(current == Some(fence.producer_revision))
     }
 
     /// Recover `last_seq` from the `/latest` key.
@@ -283,7 +308,7 @@ impl EtcdOpLogStore {
             operations.push(TxnOp::put(key.into_bytes(), value.into_bytes(), None));
         }
         operations.push(TxnOp::put(
-            latest_key.into_bytes(),
+            latest_key.clone().into_bytes(),
             max_seq.to_string().into_bytes(),
             None,
         ));
@@ -297,11 +322,51 @@ impl EtcdOpLogStore {
                 HaError::InvalidBackend(format!("etcd commit oplog: {error}"))
             })?;
         if !response.succeeded() {
-            metrics::OPLOG_ETCD_WRITE_FAILURES.inc();
+            // A stale election fence means the writer lost leadership. Never
+            // fall back to overwrite in that case; fail closed so a former
+            // leader cannot clobber the new leader's entries.
+            if !self.fence_is_valid(fence).await? {
+                metrics::OPLOG_ETCD_WRITE_FAILURES.inc();
+                metrics::OPLOG_ETCD_WRITE_LATENCY_US.observe(started.elapsed().as_micros() as f64);
+                return Err(HaError::InvalidBackend("etcd oplog writer fenced".into()));
+            }
+
+            // The remaining failure is a create/version CAS conflict: some or
+            // all of these sequence keys already exist, most likely because a
+            // previous flush actually committed but its response was lost.
+            // Match the C++ EtcdOpLogStore by falling back to per-key Put
+            // (overwrite) for idempotent replay of the same sequence/content.
+            let mut client = self.client.clone();
+            for entry in &self.buffer {
+                let key = self.entry_key(entry.seq);
+                let value = serialize_etcd_oplog_value(entry)?;
+                client
+                    .put(key.into_bytes(), value.into_bytes(), None)
+                    .await
+                    .map_err(|error| {
+                        metrics::OPLOG_ETCD_WRITE_FAILURES.inc();
+                        HaError::InvalidBackend(format!(
+                            "etcd overwrite oplog entry {}: {error}",
+                            entry.seq
+                        ))
+                    })?;
+            }
+            client
+                .put(
+                    latest_key.clone().into_bytes(),
+                    max_seq.to_string().into_bytes(),
+                    None,
+                )
+                .await
+                .map_err(|error| {
+                    metrics::OPLOG_ETCD_WRITE_FAILURES.inc();
+                    HaError::InvalidBackend(format!("etcd overwrite oplog latest: {error}"))
+                })?;
+            self.buffer.clear();
+            metrics::OPLOG_BATCH_COMMITS.inc();
+            metrics::OPLOG_SYNC_BATCH_COMMITS.inc();
             metrics::OPLOG_ETCD_WRITE_LATENCY_US.observe(started.elapsed().as_micros() as f64);
-            return Err(HaError::InvalidBackend(format!(
-                "etcd oplog writer fenced or sequence CAS failed: expected_previous_seq={expected_previous_seq}"
-            )));
+            return Ok(());
         }
 
         self.buffer.clear();
@@ -991,6 +1056,16 @@ async fn sleep_reconnect_delay(
     }
 }
 
+async fn wait_for_watch_fault(fault_rx: Option<&mut tokio::sync::watch::Receiver<u32>>) -> bool {
+    match fault_rx {
+        Some(receiver) => {
+            let _ = receiver.changed().await;
+            true
+        }
+        None => std::future::pending::<bool>().await,
+    }
+}
+
 fn decode_etcd_range_entry(key: &[u8], value: &[u8]) -> Result<OpLogRecord, HaError> {
     let key_sequence = parse_etcd_entry_key_sequence(key)?;
     let key = String::from_utf8_lossy(key);
@@ -1219,6 +1294,7 @@ impl EtcdOpLogStore {
         let mut next_watch_revision = 0;
         let mut consecutive_errors = 0usize;
         let mut reconnect_count = 0usize;
+        let mut watch_fault_rx = self.watch_fault_tx.as_ref().map(|tx| tx.subscribe());
 
         loop {
             if shutdown_rx.has_changed().unwrap_or(true) {
@@ -1298,6 +1374,18 @@ impl EtcdOpLogStore {
                         let _ = changed;
                         set_etcd_watch_health(&health, false);
                         return Ok(());
+                    }
+                    fault = wait_for_watch_fault(watch_fault_rx.as_mut()) => {
+                        if fault {
+                            let err = HaError::InvalidBackend(
+                                "injected etcd watch transport failure".to_string(),
+                            );
+                            metrics::OPLOG_WATCH_DISCONNECTIONS.inc();
+                            set_etcd_watch_health(&health, false);
+                            on_error(err);
+                            break;
+                        }
+                        continue;
                     }
                     message = stream.message() => message,
                 };

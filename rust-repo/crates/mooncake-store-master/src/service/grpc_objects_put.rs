@@ -355,6 +355,11 @@ impl MasterServiceImpl {
             .runtime_config
             .enable_tenant_quota
             .then(|| self.state.tenant_quota_policy_mutations.lock());
+        #[cfg(test)]
+        if let Some(barrier) = self.add_replica_policy_test_barrier.lock().take() {
+            barrier.signal_started();
+            barrier.wait_until_released();
+        }
         let tenant_id = self.resolve_write_tenant(&req.tenant_id)?;
         let scoped_key = tenant_id.make_scoped_key(&req.key);
         let _mutation_guard = self.state.key_mutations.lock(&scoped_key);

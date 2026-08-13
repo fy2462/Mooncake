@@ -3183,6 +3183,93 @@ async fn permanently_full_copy_target_reaches_failed_task_after_bounded_retries(
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn cpp_parity_drain_job_complete_flow() {
+    let (master, shutdown) = start_master().await;
+    let mut source = create_tcp_client(&master).await;
+    let mut target = create_tcp_client(&master).await;
+    let source_name = source.get_hostname();
+    let target_name = target.get_hostname();
+
+    let payload = |key: &str, size: usize, fill: u8| {
+        let mut value = key.as_bytes().to_vec();
+        value.resize(size, fill);
+        value
+    };
+
+    // Preload 12 distinct 128 KiB values onto the source segment.
+    let mut preload = Vec::new();
+    for index in 0..12u64 {
+        let key = format!("drain-preload-{index}");
+        let value = payload(&key, 128 * 1024, b'a' + (index % 26) as u8);
+        source
+            .put(
+                &key,
+                &value,
+                Some(ReplicateConfig {
+                    replica_num: 1,
+                    preferred_segment: source_name.clone(),
+                    ..Default::default()
+                }),
+            )
+            .await
+            .unwrap();
+        preload.push((key, value));
+    }
+
+    let job_id = source
+        .create_drain_job(&[source_name.clone()], &[target_name.clone()], 1)
+        .await
+        .unwrap();
+    // The background drain worker may advance Created -> Planning/Running before
+    // the first poll; the deterministic oracle is the terminal state below.
+    let initial_status = source.query_drain_job(job_id).await.unwrap().status;
+    assert!(
+        initial_status < proto::JobStatus::Succeeded as i32,
+        "job must not be terminal before any task executes: {initial_status}"
+    );
+
+    // Drive the production drain worker: fetch scheduled move tasks and execute
+    // them, then let the master background worker mark the job terminal.
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(20);
+    loop {
+        let job = source.query_drain_job(job_id).await.unwrap();
+        if job.status == proto::JobStatus::Succeeded as i32 {
+            break;
+        }
+        let tasks = source.fetch_tasks(1).await.unwrap();
+        for task in tasks {
+            source.execute_task_assignment(task).await.unwrap();
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "drain job did not succeed in time"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+
+    let job = source.query_drain_job(job_id).await.unwrap();
+    assert_eq!(job.status, proto::JobStatus::Succeeded as i32);
+    assert_eq!(job.active_units, 0);
+    assert_eq!(job.failed_units, 0);
+    assert!(job.succeeded_units >= 12);
+    assert!(job.migrated_bytes >= 12 * 128 * 1024);
+
+    // Every preloaded value must be readable from the target with exact bytes.
+    for (key, value) in &preload {
+        assert_eq!(&target.get(key).await.unwrap(), value);
+    }
+
+    // Dropping the source client must not lose the migrated target copies.
+    drop(source);
+    for (key, value) in &preload {
+        assert_eq!(&target.get(key).await.unwrap(), value);
+    }
+
+    drop(target);
+    let _ = shutdown.send(());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn global_disk_fifo_eviction_removes_only_the_oldest_master_replica() {
     let root = tempfile::tempdir().unwrap();
     let (master, shutdown) = start_master_with_config(MasterRuntimeConfig {

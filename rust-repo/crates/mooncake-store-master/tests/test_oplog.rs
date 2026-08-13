@@ -1696,3 +1696,23 @@ fn test_etcd_oplog_value_rejects_invalid_remove_like_tenant_identity() {
         assert!(error.to_string().contains("tenant"), "{error}");
     }
 }
+
+#[test]
+fn cpp_parity_oplog_manager_sequence_id_wrap_around() {
+    let manager = OpLogManager::new(Some(Box::new(InMemoryOpLog::new(32))), 0);
+    manager.set_initial_sequence_id(u64::MAX - 2).unwrap();
+
+    let ids = vec![
+        manager.append_and_persist("wrap-1".to_string()).unwrap(),
+        manager.append_and_persist("wrap-2".to_string()).unwrap(),
+        manager.append_and_persist("wrap-3".to_string()).unwrap(),
+    ];
+
+    assert_eq!(ids, vec![u64::MAX - 1, u64::MAX, 0]);
+    assert!(mooncake_store_master::oplog::is_sequence_newer(
+        ids[1], ids[0]
+    ));
+    assert!(mooncake_store_master::oplog::is_sequence_newer(
+        ids[2], ids[1]
+    ));
+}

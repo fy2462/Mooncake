@@ -70,8 +70,9 @@ pub use client::{
     SegmentDetail, builtin_remote_replica_score,
 };
 pub use dummy::{
-    DummyIpcChannel, DummyMemoryPool, INVALID_PHYSICAL_DEVICE_ID, IPC_SHM_FD_REQUEST,
-    IPC_SHM_REGISTER, SHM_SEG_HOT_CACHE, ShmFdRequest, ShmFdResponse, ShmRegisterRequest,
+    DummyHotBuffer, DummyHotCache, DummyIpcChannel, DummyMemoryPool, INVALID_PHYSICAL_DEVICE_ID,
+    IPC_SHM_FD_REQUEST, IPC_SHM_REGISTER, SHM_SEG_HOT_CACHE, ShmFdRequest, ShmFdResponse,
+    ShmRegisterRequest,
 };
 pub use engram::{EngramStore, EngramStoreConfig};
 pub use hot_cache::{HotCachePutToken, LocalHotCache};

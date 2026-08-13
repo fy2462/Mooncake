@@ -247,6 +247,62 @@ fn create_shared_mapping(len: usize) -> DummyClientResult<(File, usize)> {
     Ok((file, ptr as usize))
 }
 
+/// A warmed hot-cache buffer backed by a shared-memory mapping.
+///
+/// Unlike an owned `Vec<u8>`, `ptr` points directly into the Dummy client's
+/// shared hot-cache mapping so callers can validate the zero-copy ownership.
+pub struct DummyHotBuffer {
+    pub ptr: *mut c_void,
+    pub size: usize,
+}
+
+unsafe impl Send for DummyHotBuffer {}
+
+/// Shared-memory-backed hot cache used by the Dummy client.
+///
+/// This mirrors the C++ DummyClient hot-cache contract: warmed values live in a
+/// single shared mapping, `get_buffer` returns a pointer into that mapping, and
+/// `is_hot_cache_ptr` reports whether a pointer is owned by the cache.
+pub struct DummyHotCache {
+    pool: DummyMemoryPool,
+    entries: Mutex<HashMap<String, (u64, usize)>>,
+}
+
+impl DummyHotCache {
+    pub fn new_shared(total_size: usize) -> DummyClientResult<Self> {
+        Ok(Self {
+            pool: DummyMemoryPool::new_shared(total_size)?,
+            entries: Mutex::new(HashMap::new()),
+        })
+    }
+
+    pub fn put(&self, key: &str, value: &[u8]) -> DummyClientResult<()> {
+        if value.is_empty() {
+            return Err(DummyClientError::InvalidInput(
+                "hot cache value must not be empty".to_string(),
+            ));
+        }
+        let addr = self.pool.alloc(value.len())?;
+        self.pool.write(addr, value)?;
+        self.entries
+            .lock()
+            .insert(key.to_string(), (addr, value.len()));
+        Ok(())
+    }
+
+    pub fn get_buffer(&self, key: &str) -> Option<DummyHotBuffer> {
+        let (addr, size) = *self.entries.lock().get(key)?;
+        let ptr = self.pool.checked_ptr(addr, size).ok()?;
+        Some(DummyHotBuffer { ptr, size })
+    }
+
+    pub fn is_hot_cache_ptr(&self, ptr: *const c_void) -> bool {
+        let ptr = ptr as usize;
+        let base = self.pool.base_addr();
+        ptr >= base && ptr < base + self.pool.len()
+    }
+}
+
 pub struct DummyIpcChannel {
     stream: UnixStream,
 }

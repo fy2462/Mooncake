@@ -136,6 +136,9 @@ pub struct MasterServiceImpl {
     snapshot_save_in_flight: Arc<AtomicBool>,
     #[cfg(test)]
     policy_save_test_barrier: parking_lot::Mutex<Option<std::sync::Arc<PolicySaveTestBarrier>>>,
+    #[cfg(test)]
+    add_replica_policy_test_barrier:
+        parking_lot::Mutex<Option<std::sync::Arc<PolicyMutationTestBarrier>>>,
     metadata_state: MetadataState,
     graceful_unmount_scheduler: GracefulUnmountScheduler,
     processing_reaper: ProcessingReaper,
@@ -1513,6 +1516,52 @@ impl PolicySaveTestBarrier {
     }
 }
 
+#[cfg(test)]
+pub(crate) struct PolicyMutationTestBarrier {
+    started: std::sync::Mutex<bool>,
+    started_cv: std::sync::Condvar,
+    released: std::sync::Mutex<bool>,
+    released_cv: std::sync::Condvar,
+}
+
+#[cfg(test)]
+impl PolicyMutationTestBarrier {
+    fn new() -> Self {
+        Self {
+            started: std::sync::Mutex::new(false),
+            started_cv: std::sync::Condvar::new(),
+            released: std::sync::Mutex::new(false),
+            released_cv: std::sync::Condvar::new(),
+        }
+    }
+
+    fn wait_started(&self) {
+        let mut started = self.started.lock().unwrap();
+        while !*started {
+            started = self.started_cv.wait(started).unwrap();
+        }
+    }
+
+    fn release(&self) {
+        let mut released = self.released.lock().unwrap();
+        *released = true;
+        self.released_cv.notify_all();
+    }
+
+    fn signal_started(&self) {
+        let mut started = self.started.lock().unwrap();
+        *started = true;
+        self.started_cv.notify_all();
+    }
+
+    fn wait_until_released(&self) {
+        let mut released = self.released.lock().unwrap();
+        while !*released {
+            released = self.released_cv.wait(released).unwrap();
+        }
+    }
+}
+
 impl MasterServiceImpl {
     #[cfg(test)]
     pub(crate) fn install_nof_allocation_barrier(
@@ -1957,6 +2006,15 @@ impl MasterServiceImpl {
         barrier
     }
 
+    #[cfg(test)]
+    pub(crate) fn install_add_replica_policy_barrier(
+        &self,
+    ) -> std::sync::Arc<PolicyMutationTestBarrier> {
+        let barrier = std::sync::Arc::new(PolicyMutationTestBarrier::new());
+        *self.add_replica_policy_test_barrier.lock() = Some(barrier.clone());
+        barrier
+    }
+
     fn tenant_quota_policy_snapshot_from_table(
         &self,
         quotas: &TenantQuotaTable,
@@ -2349,6 +2407,8 @@ impl MasterServiceImpl {
             snapshot_save_in_flight: Arc::new(AtomicBool::new(false)),
             #[cfg(test)]
             policy_save_test_barrier: parking_lot::Mutex::new(None),
+            #[cfg(test)]
+            add_replica_policy_test_barrier: parking_lot::Mutex::new(None),
             metadata_state,
             graceful_unmount_scheduler,
             processing_reaper,
@@ -2975,6 +3035,13 @@ impl MasterServiceImpl {
     /// 获取 oplog 管理器引用 / Returns a reference to the oplog manager.
     pub fn oplog_manager(&self) -> &crate::oplog::OpLogManager {
         self.oplog_manager.as_ref()
+    }
+
+    /// Return the strict segment-catalog layer over this service's state.
+    pub(crate) fn segment_catalog(
+        &self,
+    ) -> crate::service::cluster::segment_catalog::SegmentCatalog {
+        crate::service::cluster::segment_catalog::SegmentCatalog::new(Arc::clone(&self.state))
     }
 
     /// Replace the active oplog backend without exposing a service-wide lock.
@@ -10448,6 +10515,74 @@ mod tenant_quota_parity_tests {
         assert_eq!(snapshot.used_bytes, 0);
         assert_eq!(snapshot.reserved_bytes, 0);
         assert_eq!(snapshot.metadata_object_count, 1);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn cpp_parity_delete_waits_for_inflight_add_replica_before_empty_check() {
+        let service = std::sync::Arc::new(quota_service());
+        service
+            .upsert_tenant_quota_policy("tenant-a", 1000)
+            .unwrap();
+        let client_id = Uuid::new_v4();
+        let barrier = service.install_add_replica_policy_barrier();
+
+        let replica_service = std::sync::Arc::clone(&service);
+        let add = tokio::spawn(async move {
+            MasterService::add_replica(
+                replica_service.as_ref(),
+                Request::new(proto::AddReplicaRequest {
+                    client_id: Some(uuid_to_proto(client_id)),
+                    key: "cold".into(),
+                    replica: Some(proto::ReplicaDescriptor {
+                        segment_name: "disk-endpoint".into(),
+                        status: proto::replica_descriptor::ReplicaStatus::Complete as i32,
+                        replica_type: proto::replica_descriptor::ReplicaType::LocalDisk as i32,
+                        size: 128,
+                        holder_client_id: Some(uuid_to_proto(client_id)),
+                        local_disk_storage_id: Some(uuid_to_proto(Uuid::new_v4())),
+                        ..Default::default()
+                    }),
+                    tenant_id: "tenant-a".into(),
+                }),
+            )
+            .await
+        });
+
+        barrier.wait_started();
+
+        let (delete_started_tx, delete_started_rx) = std::sync::mpsc::channel();
+        let (delete_tx, delete_rx) = std::sync::mpsc::channel();
+        let delete_service = std::sync::Arc::clone(&service);
+        let delete = std::thread::spawn(move || {
+            delete_started_tx.send(()).unwrap();
+            delete_tx
+                .send(delete_service.delete_tenant_quota_policy("tenant-a"))
+                .unwrap();
+        });
+        delete_started_rx.recv().unwrap();
+        assert!(
+            delete_rx.try_recv().is_err(),
+            "tenant deletion must wait for the in-flight AddReplica"
+        );
+
+        barrier.release();
+        add.await
+            .expect("AddReplica task joined")
+            .expect("AddReplica succeeds");
+
+        let delete_result = delete_rx
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .expect("policy delete completed after AddReplica");
+        delete.join().expect("delete thread joined");
+        let delete_result = delete_result.expect_err("delete must fail while tenant has objects");
+        assert_eq!(delete_result.code(), tonic::Code::FailedPrecondition);
+
+        let tenant = TenantId::new("tenant-a".to_owned()).expect("valid tenant");
+        let scoped_key = tenant.make_scoped_key("cold");
+        assert!(
+            service.state.objects.contains_key(&scoped_key),
+            "the in-flight AddReplica object must survive the rejected delete"
+        );
     }
 
     #[test]

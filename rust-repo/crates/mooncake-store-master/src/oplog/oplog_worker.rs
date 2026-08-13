@@ -777,21 +777,7 @@ fn run_worker(
             }) {
                 Ok(sequence_id) => {
                     has_sequence_history.store(true, Ordering::Release);
-                    let expected = latest_assigned
-                        .load(Ordering::Acquire)
-                        .checked_add(1)
-                        .ok_or_else(|| {
-                            HaError::InvalidBackend(
-                                "oplog writer sequence exhausted at u64::MAX".into(),
-                            )
-                        });
-                    let expected = match expected {
-                        Ok(expected) => expected,
-                        Err(error) => {
-                            batch_error = Some(install_poison(&control, error));
-                            break;
-                        }
-                    };
+                    let expected = latest_assigned.load(Ordering::Acquire).wrapping_add(1);
                     if sequence_id != expected {
                         batch_error = Some(install_poison(
                             &control,

@@ -52,6 +52,15 @@ use tracing::warn;
 use uuid::Uuid;
 use xxhash_rust::xxh32::xxh32;
 
+/// Wrap-around-safe sequence comparison matching C++ `IsSequenceNewer`.
+///
+/// A sequence value may wrap from `u64::MAX` to zero; casting the unsigned
+/// difference to a signed integer treats a wrapped value as newer than the
+/// pre-wrap value (as long as the gap is smaller than `2^63`).
+pub fn is_sequence_newer(a: u64, b: u64) -> bool {
+    (a.wrapping_sub(b) as i64) > 0
+}
+
 const CPP_OP_PUT_END: u8 = 1;
 const CPP_OP_PUT_REVOKE: u8 = 2;
 const CPP_OP_REMOVE: u8 = 3;
@@ -439,9 +448,7 @@ impl OpLogStore for InMemoryOpLog {
     /// Append entry: increments sequence counter, evicts oldest if at capacity.
     /// 追加条目：自增序列号，FIFO 淘汰超出容量的旧数据。
     fn append(&mut self, entry: &OpLogRecord) -> Result<u64, HaError> {
-        self.last_seq = self.last_seq.checked_add(1).ok_or_else(|| {
-            HaError::InvalidBackend("oplog sequence exhausted at u64::MAX".into())
-        })?;
+        self.last_seq = self.last_seq.wrapping_add(1);
         if self.buffer.len() >= self.max_entries {
             self.buffer.pop_front();
         }

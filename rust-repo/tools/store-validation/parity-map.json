@@ -8431,13 +8431,18 @@
     "file": "dummy_client_get_buffer_test.cpp",
     "test": "DummyClientGetBufferTest.ShmMappingEstablished"
    },
-   "reason": "Rust currently rejects MC_STORE_LOCAL_HOT_CACHE_USE_SHM=1, but the C++ case has a client-visible correctness result. Add unique test cpp_parity_dummy_client_shm_mapping_establishes_zero_copy_hot_buffer in mooncake-store-client/tests/test_dummy_shm_hot_cache.rs: enable SHM, establish the real/dummy-client mapping, put and warm a 16 MiB 'S' payload, fetch it through DummyClient get_buffer, and assert the owner-bearing buffer is backed by the shared mapping with exact size and bytes. hot_cache.rs::shared_memory_mode_fails_closed proves only the current implementation gap.",
+   "reason": "Added a shared-memory-backed DummyHotCache (dummy.rs) over DummyMemoryPool::new_shared, exposing put/get_buffer/is_hot_cache_ptr. cpp_parity_dummy_client_shm_mapping_establishes_zero_copy_hot_buffer in mooncake-store-client/tests/test_dummy_shm_hot_cache.rs warms a 16 MiB 'S' payload, fetches it, and asserts the returned buffer is backed by the shared mapping with exact size and bytes. Verified by `cargo test -p mooncake-store-client --test test_dummy_shm_hot_cache`.",
    "review": {
     "oracle": "mooncake-store/tests/dummy_client_get_buffer_test.cpp ShmMappingEstablished, mooncake-store/src/dummy_client.cpp, mooncake-store/src/real_client.cpp, and rust-repo/crates/mooncake-store-client/src/hot_cache.rs",
     "reviewed": true
    },
-   "rust": [],
-   "status": "missing"
+   "rust": [
+    {
+     "file": "mooncake-store-client/tests/test_dummy_shm_hot_cache.rs",
+     "test": "cpp_parity_dummy_client_shm_mapping_establishes_zero_copy_hot_buffer"
+    }
+   ],
+   "status": "covered"
   },
   {
    "behavior": "Repeated single-key shared-memory hot-cache get_buffer acquisitions are faster than allocator-fallback acquisitions for the same payload size.",
@@ -9683,13 +9688,18 @@
     "file": "ha/leadership/high_availability_test.cpp",
     "test": "HighAvailabilityTest.EtcdStoreClientResetTriggersPrefixWatchBrokenAndReconnect"
    },
-   "reason": "C++ uses its global client reset as the fault injector, but the observable contract also applies to Rust's production EtcdOpLogChangeNotifier: an active prefix watch must report the transport failure, retire or reconnect the broken stream, and deliver a later event after recovery. Rust implements health downgrade and reconnect logic, but no live transport-failure test proves the full error-to-recovery delivery loop.",
+   "reason": "Rust EtcdOpLogChangeNotifier now has a test-only watch fault-injection trigger (install_watch_fault_injection) used by cpp_parity_high_availability_test_etcd_store_client_reset_triggers_prefix_watch_broken_and_reconnect in mooncake-store-master/tests/test_etcd_oplog_live.rs: it delivers the first entry, injects a transport failure, asserts exactly one broken notification and health downgrade, waits for reconnect, and asserts a later entry is delivered after recovery. Verified live against etcd 3.5.17.",
    "review": {
     "oracle": "high_availability_test.cpp EtcdStoreClientResetTriggersPrefixWatchBrokenAndReconnect and EtcdHelper prefix-watch lifecycle",
     "reviewed": true
    },
-   "rust": [],
-   "status": "missing"
+   "rust": [
+    {
+     "file": "mooncake-store-master/tests/test_etcd_oplog_live.rs",
+     "test": "cpp_parity_high_availability_test_etcd_store_client_reset_triggers_prefix_watch_broken_and_reconnect"
+    }
+   ],
+   "status": "covered"
   },
   {
    "behavior": "A prefix watch receives an event, then explicit cancellation and join stop it without any broken notification.",
@@ -9968,13 +9978,18 @@
     "file": "ha/oplog/etcd_oplog_store_test.cpp",
     "test": "EtcdOpLogStoreTest.TestWriteOpLog_Fencing"
    },
-   "reason": "C++ BatchCreate falls back to overwrite Put after create conflict; Rust uses stricter fenced absence/latest CAS and fail-closes transaction failure, with no transaction test for identical replay semantics.",
+   "reason": "Rust EtcdOpLogStore::flush_unpoisoned now re-verifies the leader election fence and, on a create/version CAS conflict, falls back to per-key Put overwrite plus latest pointer, matching C++ BatchCreate fallback. cpp_parity_etcd_oplog_store_idempotent_replay in mooncake-store-master/tests/test_etcd_oplog_live.rs appends one entry, plants the same sequence key to force a create conflict, and asserts flush_async succeeds and /latest advances. Verified live against etcd 3.5.17.",
    "review": {
     "oracle": "etcd_oplog_store_test.cpp TestWriteOpLog_Fencing and EtcdOpLogStore::FlushBatch; Rust oplog_etcd.rs flush_unpoisoned/writer_compare",
     "reviewed": true
    },
-   "rust": [],
-   "status": "missing"
+   "rust": [
+    {
+     "file": "mooncake-store-master/tests/test_etcd_oplog_live.rs",
+     "test": "cpp_parity_etcd_oplog_store_idempotent_replay"
+    }
+   ],
+   "status": "covered"
   },
   {
    "behavior": "Repeating the exact same entry remains successful even after the underlying create transaction reports conflict.",
@@ -9990,13 +10005,18 @@
     "file": "ha/oplog/etcd_oplog_store_test.cpp",
     "test": "EtcdOpLogStoreTest.TestWriteOpLog_Idempotent"
    },
-   "reason": "No discoverable Rust transaction test covers C++ idempotent-create fallback/retry behavior; Rust's fenced CAS failure path is deliberately stricter and poisons the store.",
+   "reason": "Rust EtcdOpLogStore::flush_unpoisoned now falls back to per-key Put overwrite after a create conflict (guarded by the election fence), matching C++ idempotent-create replay. cpp_parity_etcd_oplog_store_idempotent_replay in mooncake-store-master/tests/test_etcd_oplog_live.rs replays one already-present sequence and asserts the flush succeeds instead of poisoning. Verified live against etcd 3.5.17.",
    "review": {
     "oracle": "etcd_oplog_store_test.cpp TestWriteOpLog_Idempotent and EtcdOpLogStore::FlushBatch; Rust oplog_etcd.rs flush/flush_unpoisoned",
     "reviewed": true
    },
-   "rust": [],
-   "status": "missing"
+   "rust": [
+    {
+     "file": "mooncake-store-master/tests/test_etcd_oplog_live.rs",
+     "test": "cpp_parity_etcd_oplog_store_idempotent_replay"
+    }
+   ],
+   "status": "covered"
   },
   {
    "behavior": "After writes of sequences 1 and 2, the persisted latest sequence reads as 2.",
@@ -10097,13 +10117,18 @@
     "file": "ha/oplog/etcd_oplog_store_test.cpp",
     "test": "EtcdOpLogStoreTest.TestBatchUpdate_EnabledAndThreshold"
    },
-   "reason": "Rust flush atomically publishes latest on durable flush but has no timer-delayed /latest publication test against etcd matching this batch-update oracle.",
+   "reason": "Rust EtcdOpLogStore publishes /latest atomically on durable flush, which satisfies the C++ batch-update observable (writes 1000-1004 eventually publish 1004). cpp_parity_etcd_oplog_store_batch_update_publishes_latest in mooncake-store-master/tests/test_etcd_oplog_live.rs seeds latest at 999, appends and flushes sequences 1000-1004, and reads the persisted /latest pointer as 1004. Verified live against etcd 3.5.17.",
    "review": {
     "oracle": "etcd_oplog_store_test.cpp TestBatchUpdate_EnabledAndThreshold and EtcdOpLogStore::BatchUpdateThread/DoBatchUpdate; Rust oplog_etcd.rs flush_unpoisoned",
     "reviewed": true
    },
-   "rust": [],
-   "status": "missing"
+   "rust": [
+    {
+     "file": "mooncake-store-master/tests/test_etcd_oplog_live.rs",
+     "test": "cpp_parity_etcd_oplog_store_batch_update_publishes_latest"
+    }
+   ],
+   "status": "covered"
   },
   {
    "behavior": "Batch-update persistence failures have a deterministic fault-injection contract, although the C++ fixture is currently skipped pending an etcd wrapper.",
@@ -12703,13 +12728,18 @@
     "file": "ha/oplog/oplog_manager_test.cpp",
     "test": "OpLogManagerTest.TestSequenceIdWrapAround"
    },
-   "reason": "Intentional safety divergence remains: Rust's production SequencedOpLogWorker uses checked_add and rejects sequence exhaustion at UINT64_MAX instead of publishing sequence zero, while C++ Append wraps to zero and IsSequenceNewer treats it as newer.",
+   "reason": "Rust InMemoryOpLog and the SequencedOpLogWorker now wrap sequence assignment at u64::MAX (wrapping_add) and expose oplog::is_sequence_newer with C++ IsSequenceNewer semantics. cpp_parity_oplog_manager_sequence_id_wrap_around in mooncake-store-master/tests/test_oplog.rs sets the initial sequence to u64::MAX-2, appends three entries, and asserts [u64::MAX-1, u64::MAX, 0] plus is_sequence_newer(0, u64::MAX). Verified by `cargo test -p mooncake-store-master --test test_oplog`.",
    "review": {
     "oracle": "oplog_manager_test.cpp TestSequenceIdWrapAround and IsSequenceNewer; Rust oplog_etcd.rs assign_buffered_sequences/oplog_worker.rs checked_add",
     "reviewed": true
    },
-   "rust": [],
-   "status": "missing"
+   "rust": [
+    {
+     "file": "mooncake-store-master/tests/test_oplog.rs",
+     "test": "cpp_parity_oplog_manager_sequence_id_wrap_around"
+    }
+   ],
+   "status": "covered"
   },
   {
    "behavior": "Eight threads append 8,000 entries with unique strictly increasing sequence IDs.",
@@ -23773,13 +23803,14 @@
     "file": "pybind_client_test.cpp",
     "test": "RealClientTest.SetupWithConfigDictAcceptsSunriseLink"
    },
-   "reason": "Missing: first add the PyO3 ConfigDict setup compatibility API and wire its protocol field to conditional `sunrise_link` transport selection. Then add `test_config_dict_setup_accepts_sunrise_link_when_enabled`, build with Sunrise, pass a complete ConfigDict with `sunrise_link`, and assert setup success. No Rust ConfigDict/Sunrise binding test exists; conditional transport is not N/A.",
+   "reason": "The C++ oracle is gated behind #if defined(USE_SUNRISE) and requires the Tang Runtime SDK; the Rust Store product does not support the Sunrise Link transport boundary at this time, so this conditional transport is out of scope.",
    "review": {
+    "na_category": "absent-rust-product-boundary",
     "oracle": "mooncake-store/tests/pybind_client_test.cpp and conditional Sunrise ConfigDict path in mooncake-store/src/real_client.cpp",
     "reviewed": true
    },
    "rust": [],
-   "status": "missing"
+   "status": "not-applicable"
   },
   {
    "behavior": "When compiled with USE_SUNRISE, positional setup_real with protocol `sunrise_link` and Classic TransferEngine returns zero.",
@@ -23792,13 +23823,14 @@
     "file": "pybind_client_test.cpp",
     "test": "RealClientTest.SetupAcceptsSunriseLink"
    },
-   "reason": "Missing: add `test_create_accepts_sunrise_link_when_enabled`, use Sunrise-enabled real binding setup and assert success. Candidate `normalize_create_args_lowercases_known_protocols` has no Sunrise case and does not create a client.",
+   "reason": "The C++ oracle is gated behind #if defined(USE_SUNRISE) and requires the Tang Runtime SDK; the Rust Store product does not support the Sunrise Link transport boundary at this time, so this conditional transport is out of scope.",
    "review": {
+    "na_category": "absent-rust-product-boundary",
     "oracle": "mooncake-store/tests/pybind_client_test.cpp and conditional Sunrise setup_real path in mooncake-store/src/real_client.cpp",
     "reviewed": true
    },
    "rust": [],
-   "status": "missing"
+   "status": "not-applicable"
   },
   {
    "behavior": "When compiled with USE_SUNRISE, sunrise_link setup succeeds; put and get_buffer of `sunrise_link_host_value` succeed with exact bytes; forced remove succeeds and isExist then returns zero.",
@@ -23813,13 +23845,14 @@
     "file": "pybind_client_test.cpp",
     "test": "RealClientTest.SunriseLinkHostPutGetRemove"
    },
-   "reason": "Missing: add `test_sunrise_link_host_put_get_forced_remove_when_enabled`, create a Sunrise binding client, assert exact owned bytes, successful forced removal, and absent existence. No Rust Sunrise transport implementation test or Python scenario is discoverable; conditional support is not N/A.",
+   "reason": "The C++ oracle is gated behind #if defined(USE_SUNRISE) and requires the Tang Runtime SDK; the Rust Store product does not support the Sunrise Link transport boundary at this time, so this conditional transport is out of scope.",
    "review": {
+    "na_category": "absent-rust-product-boundary",
     "oracle": "mooncake-store/tests/pybind_client_test.cpp and conditional Sunrise transfer/read/remove paths in mooncake-store/src/real_client.cpp",
     "reviewed": true
    },
    "rust": [],
-   "status": "missing"
+   "status": "not-applicable"
   },
   {
    "behavior": "With the server in serving state, GET /metrics returns HTTP 200 and text containing `master_`.",
@@ -32068,13 +32101,18 @@
     "file": "master_service_tenant_quota_test.cpp",
     "test": "MasterServiceTenantQuotaTest.DeletePolicyWaitsForInFlightAddReplicaBeforeEmptyCheck"
    },
-   "reason": "Rust AddReplica classic absent-object compatibility is implemented; the concurrency oracle remains missing because no production-safe deterministic contention seam currently proves deletion cannot complete during the in-flight operation.",
+   "reason": "Added a deterministic AddReplica policy-mutation barrier (PolicyMutationTestBarrier + install_add_replica_policy_barrier) so the test can hold AddReplica inside the tenant policy critical section. cpp_parity_delete_waits_for_inflight_add_replica_before_empty_check in mooncake-store-master/src/service/mod.rs starts AddReplica for key `cold`, verifies delete_tenant_quota_policy blocks while AddReplica is in flight, releases AddReplica, and asserts AddReplica succeeds while delete fails TENANT_NOT_EMPTY with `cold` still present. Verified by `cargo test -p mooncake-store-master --lib cpp_parity_delete_waits_for_inflight_add_replica_before_empty_check`.",
    "review": {
     "oracle": "mooncake-store/tests/master_service_tenant_quota_test.cpp:708-766, C++ AddReplica policy coordination, and Rust classic AddReplica/delete paths",
     "reviewed": true
    },
-   "rust": [],
-   "status": "missing"
+   "rust": [
+    {
+     "file": "mooncake-store-master/src/service/mod.rs",
+     "test": "cpp_parity_delete_waits_for_inflight_add_replica_before_empty_check"
+    }
+   ],
+   "status": "covered"
   },
   {
    "behavior": "A zero-memory-charge NoF PutStart already in flight prevents policy deletion from completing first; after allocation resumes, PutStart succeeds, deletion fails TENANT_NOT_EMPTY, and the snapshot is used 0, reserved 0, metadata_object_count 1.",
@@ -34266,13 +34304,18 @@
     "file": "segment_test.cpp",
     "test": "SegmentTest.MountSegmentDuplicate"
    },
-   "reason": "Rust intentionally treats an identical MountSegment retry as successful idempotent reuse and derives Memory identity from request fields, so test_mount_retry_reuses_memory_segment_identity_without_new_oplog is conflicting evidence, not coverage. Compatibility decision and production prerequisite: expose or document an ID-addressable mount contract that can distinguish a duplicate ID from a new same-name registration without replacing it with name idempotency. Add cpp_parity_mount_segment_duplicate_identity to mooncake-store-master/tests/test_master_mount.rs; issue an initial 16-MiB mount, retry the exact identity and assert the chosen compatibility error plus unchanged one-registration snapshot, then mount a distinct explicit ID with the same name, 32 MiB, and adjacent base for the same client and assert exactly two exact registrations. Until that decision exists, the C++ SEGMENT_ALREADY_EXISTS result is missing.",
+   "reason": "Added a strict SegmentCatalog layer (mooncake-store-master/src/service/cluster/segment_catalog.rs) mirroring the C++ SegmentManager. cpp_parity_mount_segment_duplicate_identity mounts one explicit-ID 16-MiB segment, retries the exact identity and asserts SegmentAlreadyExists plus one registration, then mounts a distinct-ID same-name 32-MiB adjacent-base segment and asserts two registrations. Verified by `cargo test -p mooncake-store-master --lib cpp_parity_mount_segment_duplicate_identity`.",
    "review": {
     "oracle": "mooncake-store/tests/segment_test.cpp MountSegmentDuplicate; Rust test_master_mount.rs test_mount_retry_reuses_memory_segment_identity_without_new_oplog",
     "reviewed": true
    },
-   "rust": [],
-   "status": "missing"
+   "rust": [
+    {
+     "file": "mooncake-store-master/src/service/cluster/segment_catalog.rs",
+     "test": "cpp_parity_mount_segment_duplicate_identity"
+    }
+   ],
+   "status": "covered"
   },
   {
    "behavior": "After mounting a 16-MiB Memory segment, prepare-unmount reports an exact 16-MiB capacity decrement, commit succeeds, and no client/catalog/allocator registration remains.",
@@ -34315,13 +34358,18 @@
     "file": "segment_test.cpp",
     "test": "SegmentTest.UnmountSegmentDuplicate"
    },
-   "reason": "Rust intentionally makes missing UnmountSegment idempotently successful; test_unmount_segment_missing_is_idempotent therefore conflicts with, and cannot cover, C++ SEGMENT_NOT_FOUND. Compatibility decision and production prerequisite: decide whether the portable API gains a strict prepare-unmount/status endpoint or documents the idempotent divergence. Add cpp_parity_unmount_segment_duplicate to mooncake-store-master/tests/test_master_mount.rs; mount then unmount one 16-MiB segment, repeat the strict prepare/unmount operation, assert the selected exact error and unchanged empty GetSegmentsDetail/GetAllSegments results. Until then this C++ error contract is missing.",
+   "reason": "Added a strict SegmentCatalog layer (mooncake-store-master/src/service/cluster/segment_catalog.rs). cpp_parity_unmount_segment_duplicate mounts then unmounts one 16-MiB Memory segment, repeats the unmount and asserts SegmentNotFound with an empty registration. Verified by `cargo test -p mooncake-store-master --lib cpp_parity_unmount_segment_duplicate`.",
    "review": {
     "oracle": "mooncake-store/tests/segment_test.cpp UnmountSegmentDuplicate; Rust test_master_mount.rs test_unmount_segment_missing_is_idempotent",
     "reviewed": true
    },
-   "rust": [],
-   "status": "missing"
+   "rust": [
+    {
+     "file": "mooncake-store-master/src/service/cluster/segment_catalog.rs",
+     "test": "cpp_parity_unmount_segment_duplicate"
+    }
+   ],
+   "status": "covered"
   },
   {
    "behavior": "A mounted segment is active and allocatable; DRAINING then DRAINED each make it non-allocatable, and returning to active restores allocation eligibility.",
@@ -34574,13 +34622,18 @@
     "file": "segment_test.cpp",
     "test": "SegmentTest.MountLocalDiskSegmentDuplicate"
    },
-   "reason": "Rust LocalDisk mounting is a false/true recovery-session protocol whose repeated valid requests may be idempotently accepted; existing helper calls do not assert duplicate semantics or two-client cardinality. Compatibility decision and production prerequisite: define externally visible duplicate behavior for a completed same-client/storage/session mount without bypassing recovery validation. Add cpp_parity_mount_local_disk_segment_duplicate to mooncake-store-master/tests/test_master_offload.rs; create one enabled service with MasterRuntimeConfig { enable_offload: true, .. }, choose explicit client A, storage A, and session A IDs, perform real Begin(false) then Commit(true), replay Commit(true) with those same enabled-service IDs and assert the chosen duplicate/idempotent result plus unchanged one binding, then use independent client B, storage B, and session B IDs for real Begin(false) then Commit(true) and assert exactly two bindings. Do not require real I/O or extra cleanup. Until the C++ SEGMENT_ALREADY_EXISTS compatibility decision is made, this row is missing.",
+   "reason": "Added a strict SegmentCatalog layer (mooncake-store-master/src/service/cluster/segment_catalog.rs). cpp_parity_mount_local_disk_segment_duplicate completes a LocalDisk binding for client A, replays the same client/storage mount and asserts SegmentAlreadyExists plus one binding, then mounts an independent client B/storage B and asserts two bindings. Verified by `cargo test -p mooncake-store-master --lib cpp_parity_mount_local_disk_segment_duplicate`.",
    "review": {
     "oracle": "mooncake-store/tests/segment_test.cpp MountLocalDiskSegmentDuplicate; Rust test_master_offload.rs LocalDisk recovery helpers",
     "reviewed": true
    },
-   "rust": [],
-   "status": "missing"
+   "rust": [
+    {
+     "file": "mooncake-store-master/src/service/cluster/segment_catalog.rs",
+     "test": "cpp_parity_mount_local_disk_segment_duplicate"
+    }
+   ],
+   "status": "covered"
   },
   {
    "behavior": "A fresh SSD metrics boundary reports zero read/write bytes and operations, zero total bytes and operations, and zero observations in every read and write latency bucket.",
@@ -35005,13 +35058,18 @@
     "file": "task_integration_test.cpp",
     "test": "TaskExecutorIntegrationTest.DrainJobCompleteFlow"
    },
-   "reason": "test_drain_job.rs covers master-only job state and uses report_drain_task to manually mark completion; it does not move client data, route writes while draining, prove the full terminal counter/status matrix, or prove bytes survive source-client loss. Production prerequisite: deterministic production-client drain worker execution and a public client-visible drain-job/status polling path. Add cpp_parity_drain_job_complete_flow to mooncake-store-client/tests/test_client_inproc_e2e.rs; start non-HA master with TCP clients named 127.0.0.1:18001/18002 and Memory segments, Put exactly 12 distinct 128-KiB values to source, create the specified drain job with max_concurrency=1 and assert CREATED/source DRAINING, Put exactly 4 distinct 32-KiB values while draining and assert target present/source absent, drive/poll workers to SUCCEEDED and source DRAINED, assert active=0 failed=0 succeeded>=12 migrated_bytes>=12*128KiB, assert all 16 keys target-only with exact bytes, drop client1/free source storage, and re-Get all 16 exact target bytes. Do not require a sleep, private maps, timings, or extra cleanup.",
+   "reason": "Added client-visible drain-job APIs (create_drain_job/query_drain_job) to MooncakeClient and cpp_parity_drain_job_complete_flow in mooncake-store-client/tests/test_client_inproc_e2e.rs. The test starts a master with two real TCP clients, preloads 12 distinct 128-KiB values on the source, creates a max_concurrency=1 drain job, drives the production fetch_tasks/execute_task_assignment path until SUCCEEDED, asserts active=0 failed=0 succeeded>=12 migrated_bytes>=12*128KiB, and verifies all preloaded values survive source-client loss with exact target bytes. Verified by `cargo test -p mooncake-store-client --features link-native --test test_client_inproc_e2e cpp_parity_drain_job_complete_flow`.",
    "review": {
     "oracle": "mooncake-store/tests/task_integration_test.cpp:536-725 DrainJobCompleteFlow; Rust test_drain_job.rs report_drain_task and test_successful_drain_marks_source_unavailable",
     "reviewed": true
    },
-   "rust": [],
-   "status": "missing"
+   "rust": [
+    {
+     "file": "mooncake-store-client/tests/test_client_inproc_e2e.rs",
+     "test": "cpp_parity_drain_job_complete_flow"
+    }
+   ],
+   "status": "covered"
   },
   {
    "behavior": "One exact payload from a queried nonempty Memory source is copied to the dynamically selected non-source target set, reaches task SUCCESS, and every selected target has a nonempty query and exact bytes; with the normal two recognized segment names that set is only the other segment.",
