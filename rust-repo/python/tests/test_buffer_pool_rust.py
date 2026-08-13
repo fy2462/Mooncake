@@ -84,6 +84,19 @@ def test_buffer_pool_uses_store_local_buffer_by_default(rust_client) -> None:
     pool.close()
 
 
+def test_buffer_pool_overflows_when_local_buffer_is_full(rust_client) -> None:
+    binding = _binding()
+    pool = binding.BufferPool(rust_client)
+
+    local_lease = pool.acquire(4 * 1024 * 1024)
+    overflow_lease = pool.acquire(1024, block=False)
+    assert overflow_lease.size == 1024
+
+    overflow_lease.release()
+    local_lease.release()
+    pool.close()
+
+
 def test_buffer_pool_uses_local_buffer_alignment(rust_client) -> None:
     binding = _binding()
     pool = binding.BufferPool(rust_client, min_size_class=4096, alignment=65536)

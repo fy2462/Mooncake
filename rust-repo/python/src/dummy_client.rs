@@ -399,6 +399,36 @@ impl PythonMooncakeDummyClient {
         })
     }
 
+    #[pyo3(signature = (buffers, keys, dst_offsets, src_offsets, sizes))]
+    fn get_into_ranges(
+        &self,
+        buffers: Vec<u64>,
+        keys: Vec<Vec<String>>,
+        dst_offsets: Vec<Vec<Vec<usize>>>,
+        src_offsets: Vec<Vec<Vec<usize>>>,
+        sizes: Vec<Vec<Vec<usize>>>,
+    ) -> PyResult<Vec<Vec<Vec<i64>>>> {
+        let mut ptrs = Vec::with_capacity(buffers.len());
+        for (buffer_index, buffer_addr) in buffers.iter().enumerate() {
+            let required = dst_offsets[buffer_index]
+                .iter()
+                .zip(sizes[buffer_index].iter())
+                .flat_map(|(offsets, lengths)| offsets.iter().zip(lengths.iter()))
+                .map(|(offset, length)| offset.checked_add(*length).unwrap_or(usize::MAX))
+                .max()
+                .unwrap_or(0);
+            ptrs.push(self.checked_ptr(*buffer_addr, required)?);
+        }
+        let inner = self.inner.clone();
+        pyo3_async_runtimes::tokio::get_runtime().block_on(async {
+            let mut client = take_client(&inner).await?;
+            let result = client
+                .get_into_ranges(&ptrs, &keys, &dst_offsets, &src_offsets, &sizes)
+                .await;
+            result.map_err(to_py_err)
+        })
+    }
+
     fn health_check<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         let inner = self.inner.clone();
         pyo3_async_runtimes::tokio::future_into_py(py, async move {

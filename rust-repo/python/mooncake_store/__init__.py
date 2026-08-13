@@ -4,6 +4,7 @@ from importlib import import_module
 
 _RUST_EXPORTS = {
     "MooncakeClient",
+    "MooncakeDummyClient",
     "ParallelAxis",
     "ReadTarget",
     "ReplicateConfig",

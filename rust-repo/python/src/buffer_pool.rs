@@ -69,19 +69,23 @@ impl PoolCore {
         Ok(size)
     }
 
+    fn region_available(&self, state: &PoolState) -> bool {
+        self.max_regions.is_none_or(|limit| {
+            state
+                .active
+                .len()
+                .checked_add(state.reserved_regions)
+                .is_some_and(|count| count < limit)
+        })
+    }
+
     fn has_capacity(&self, state: &PoolState, size: usize) -> bool {
         let bytes_available = state
             .total_bytes
             .checked_add(state.reserved_bytes)
             .and_then(|used| self.max_bytes.checked_sub(used))
             .is_some_and(|remaining| size <= remaining);
-        let region_available = self.max_regions.is_none_or(|limit| {
-            state
-                .active
-                .len()
-                .checked_add(state.reserved_regions)
-                .is_some_and(|count| count < limit)
-        });
+        let region_available = self.region_available(state);
         bytes_available && region_available
     }
 
@@ -113,6 +117,20 @@ impl PoolCore {
                 return Ok(());
             }
             if !block {
+                // C++ BufferPool overflow contract: a full local-buffer byte
+                // budget is a soft limit (block=False allocates an extra
+                // registered buffer), but a region-count limit is hard.
+                if self.region_available(&state) {
+                    state.reserved_bytes = state
+                        .reserved_bytes
+                        .checked_add(size)
+                        .ok_or_else(|| pool_err("buffer pool reservation overflow"))?;
+                    state.reserved_regions = state
+                        .reserved_regions
+                        .checked_add(1)
+                        .ok_or_else(|| pool_err("buffer pool region count overflow"))?;
+                    return Ok(());
+                }
                 return Err(pool_err("buffer pool is exhausted"));
             }
             match deadline {
